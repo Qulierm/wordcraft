@@ -419,6 +419,22 @@ fn stack(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     });
 }
 
+/// Layout › Size: the named paper sizes, then More Paper Sizes… for a custom size in Page
+/// Setup (#1433).
+pub(crate) fn size_menu(ui: &mut Ui, app: &mut WordApp) {
+    for (n, w, h) in wordcraft_geom::PAPER_SIZES {
+        // Paper names are the industry's (Letter, A4, B5 (JIS)) and stay as they are; the
+        // envelopes say what they are. Sizes in the measurement unit, written the region's
+        // way (`21 cm × 29,7 cm`, #838).
+        let name = if n.starts_with("Envelope ") { tl!(n) } else { n };
+        let (width, height) = (crate::options::length(*w), crate::options::length(*h));
+        let label = crate::i18n::fmt(tl!("{paper}   {width} × {height}"), &[("paper", name), ("width", &width), ("height", &height)]);
+        mi_text(ui, app, &label, "layout.size", json!({"name": n}));
+    }
+    ui.separator();
+    mi(ui, app, crate::dialogs::PAPER_LABELS.more, "ui.dialog", json!({"name": "pageSetup"}));
+}
+
 #[cfg(test)]
 thread_local! {
     /// The Home Font and Paragraph control rows drawn in the last frame, by name: `top()` is where
@@ -453,13 +469,14 @@ fn mi_text(ui: &mut Ui, app: &mut WordApp, text: &str, id: &str, params: Value) 
 }
 
 /// The proofing languages the Language menu offers: tag and English name (translated when drawn).
-pub(crate) const PROOFING_LANGUAGES: [(&str, &str); 6] = [
+pub(crate) const PROOFING_LANGUAGES: [(&str, &str); 7] = [
     ("en-US", "English (United States)"),
     ("en-GB", "English (United Kingdom)"),
     ("pl-PL", "Polish"),
     ("pt-BR", "Portuguese (Brazil)"),
     ("it-IT", "Italian"),
     ("hr-HR", "Croatian"),
+    ("tr-TR", "Turkish"),
 ];
 
 /// The English name of a proofing language tag, as the status bar shows it (no tag: WordCraft's
@@ -496,6 +513,7 @@ pub(crate) fn language_name(tag: Option<&str>) -> String {
             wordcraft_engine::proof::ProofLang::Hr => "Croatian".into(),
             wordcraft_engine::proof::ProofLang::Pt => "Portuguese (Brazil)".into(),
             wordcraft_engine::proof::ProofLang::It => "Italian".into(),
+            wordcraft_engine::proof::ProofLang::Tr => "Turkish".into(),
             wordcraft_engine::proof::ProofLang::En if tag.eq_ignore_ascii_case("en") => "English (United States)".into(),
             _ => tag.to_string(),
         },
@@ -603,6 +621,8 @@ pub(crate) fn language_menu(ui: &mut Ui, app: &mut WordApp) {
             || (tag == "pl-PL" && current.eq_ignore_ascii_case("pl"))
             || (tag == "pt-BR" && current.eq_ignore_ascii_case("pt"))
             || (tag == "it-IT" && current.eq_ignore_ascii_case("it"))
+            || (tag == "hr-HR" && current.eq_ignore_ascii_case("hr"))
+            || (tag == "tr-TR" && current.eq_ignore_ascii_case("tr"))
             || (tag == "en-US" && current.eq_ignore_ascii_case("en"))
     };
     let checks = language_checks(&current, listed);
@@ -1346,17 +1366,7 @@ fn layout(app: &mut WordApp, ui: &mut Ui) {
             mi(ui, app, "Portrait", "layout.orientation", json!({"value": "portrait"}));
             mi(ui, app, "Landscape", "layout.orientation", json!({"value": "landscape"}));
         });
-        menu_button(ui, app, "size", Some("Size"), "Size", true, "layout.size", |ui, app| {
-            for (n, w, h) in wordcraft_geom::PAPER_SIZES {
-                // Paper names are the industry's (Letter, A4, B5 (JIS)) and stay as they are; the
-                // envelopes say what they are. Sizes in the measurement unit, written the region's
-                // way (`21 cm × 29,7 cm`, #838).
-                let name = if n.starts_with("Envelope ") { tl!(n) } else { n };
-                let (width, height) = (crate::options::length(*w), crate::options::length(*h));
-                let label = crate::i18n::fmt(tl!("{paper}   {width} × {height}"), &[("paper", name), ("width", &width), ("height", &height)]);
-                mi_text(ui, app, &label, "layout.size", json!({"name": n}));
-            }
-        });
+        menu_button(ui, app, "size", Some("Size"), "Size", true, "layout.size", size_menu);
         menu_button(ui, app, "columns", Some("Columns"), "Columns", true, "layout.columns", |ui, app| {
             mi(ui, app, "One", "layout.columns", json!({"count": 1}));
             mi(ui, app, "Two", "layout.columns", json!({"count": 2}));
@@ -1885,6 +1895,7 @@ fn view(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "newWindow", "New\nWindow", "view.newWindow", json!({}), false);
         big(ui, app, "arrangeAll", "Arrange\nAll", "view.arrangeAll", json!({}), false);
         big(ui, app, "split", "Split", "view.split", json!({}), false);
+        big(ui, app, "fullScreen", "Full\nScreen", "view.fullScreen", json!({}), v.full_screen);
     });
     group(ui, "Macros", None, app, |ui, app| {
         big(ui, app, "macros", "Macros", "tools.macros", json!({}), false);
@@ -2263,6 +2274,25 @@ fn picture_format(app: &mut WordApp, ui: &mut Ui) {
         menu_button(ui, app, "picture", Some("Transparency"), "Picture transparency", true, "picture.transparency", |ui, app| {
             for v in [0.0, 15.0, 30.0, 50.0, 65.0, 80.0, 95.0] {
                 mi(ui, app, &format!("{v:.0}%"), "picture.transparency", json!({"percent": v}));
+            }
+            ui.separator();
+            // An exact value, dragged with a live preview: absolute from the original
+            // pixels, one undo step for the whole drag (same pattern as Size › W/H).
+            // The current value isn't stored anywhere, so the slider reopens where it
+            // was last left for this picture.
+            let (media, off) = match wordcraft_engine::cmd::objects::selected(&app.session) {
+                Some((pos, wordcraft_doc::para::InlineObject::Image { media, .. })) => (media, pos.off),
+                _ => (String::new(), 0),
+            };
+            let key = egui::Id::new(("picture_transparency", media, off));
+            let mut v = ui.data(|d| d.get_temp::<f64>(key)).unwrap_or(0.0);
+            let r = ui.add(egui::DragValue::new(&mut v).speed(1.0).range(0.0..=100.0).suffix("%"));
+            if r.changed() {
+                ui.data_mut(|d| d.insert_temp(key, v));
+                if r.dragged() && !r.drag_started() {
+                    app.session.join_next_undo();
+                }
+                let _ = app.run("picture.transparency", json!({"percent": v}));
             }
         });
         stack(ui, |ui| {
@@ -2688,6 +2718,14 @@ mod tests {
         assert_eq!(language_name(Some("pt-BR")), "Portuguese (Brazil)");
         assert_eq!(language_name(Some("pt")), "Portuguese (Brazil)");
         assert_eq!(language_name(Some("PT-BR".to_string().as_str())), "Portuguese (Brazil)");
+    }
+
+    #[test]
+    fn turkish_has_a_name_in_the_language_menu() {
+        assert!(PROOFING_LANGUAGES.iter().any(|(t, _)| *t == "tr-TR"));
+        assert_eq!(language_name(Some("tr-TR")), "Turkish");
+        assert_eq!(language_name(Some("tr")), "Turkish");
+        assert_eq!(language_name(Some("TR-TR")), "Turkish");
     }
 
     #[test]

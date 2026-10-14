@@ -192,16 +192,49 @@ pub(crate) fn qat_menu(ui: &mut Ui, app: &mut WordApp) {
 /// calls (`unsafe`, which the workspace forbids). So the title bar is that band: the lights sit
 /// vertically centred in it, with the controls beside them.
 pub const MAC_TITLE_BAR: f32 = 28.0;
+/// The traffic lights as AppKit lays them out: button diameter, centre-to-centre pitch and the
+/// first button's left edge (8–10 pt depending on the macOS version; the larger value keeps the
+/// gap after them from shrinking).
+const MAC_LIGHT: f32 = 12.0;
+const MAC_LIGHT_PITCH: f32 = 20.0;
+const MAC_LIGHTS_LEFT: f32 = 10.0;
+/// Where title-bar content starts to the right of the traffic lights (the title bar here, the
+/// Backstage back button, #222): the end of the three lights plus the same gap the lights keep
+/// from the top of the window. Also the floor our own measurement can never go below.
+pub const MAC_CONTENT_LEFT: f32 = MAC_LIGHTS_LEFT + 2.0 * MAC_LIGHT_PITCH + MAC_LIGHT + (MAC_TITLE_BAR - MAC_LIGHT) / 2.0;
 /// The horizontal space the native traffic lights take, in egui points, for the current interface
 /// zoom: the window's own measurement when it can report one (in native-scale points, so it does not
 /// change with our zoom), otherwise the conservative fallback below, plus our own gap. Dividing by
 /// the zoom is what makes the *physical* reservation constant at 80 % and at 200 % — never
 /// `pixels_per_point`, which describes the display, not the interface size.
+/// The macOS title bar geometry the UI draws with, sanitised: a non-finite or out-of-range height
+/// keeps the standard 28-point bar, and a nonsense `content_left` keeps the standard 70 points.
+pub fn sanitised_mac_title_bar(app: &WordApp) -> MacTitleBar {
+    let raw = app.mac_titlebar;
+    let height = if raw.height.is_finite() && (MAC_TITLE_BAR..=400.0).contains(&raw.height) { raw.height } else { MAC_TITLE_BAR };
+    let content_left =
+        if raw.content_left.is_finite() && raw.content_left > 0.0 { raw.content_left.clamp(MAC_CONTENT_LEFT, 400.0) } else { MAC_CONTENT_LEFT };
+    MacTitleBar { height, content_left }
+}
+
+/// The native strip the macOS header and Backstage must leave free, in egui points.
+///
+/// Two independent, safe observations are combined conservatively: our own per-frame measurement of
+/// the lights' width (`native_lights`, through eframe's `WindowChromeMetrics`) plus the gap we keep
+/// after them, and upstream's measured `MacTitleBar::content_left` — where AppKit itself leaves room
+/// for content. The larger wins, so neither observation can shrink the strip below what the other
+/// saw, and the result is divided by the interface zoom the way the caller has always done.
+///
+/// The zoom gate below is deliberately left as it is: it accepts 0.8…2.0 and otherwise falls back to
+/// 1.0, which is wrong for a fractional zoom such as the 0.5 a 100 % interface has on a 2× display.
+/// That known defect is reported, not silently repaired here.
 pub fn native_reservation(app: &WordApp, ctx: &egui::Context) -> f32 {
     let native = app.native_lights.filter(|s| s.x.is_finite() && s.x > 0.0).map_or(NATIVE_LIGHTS_W, |s| s.x.clamp(1.0, 400.0));
+    let measured = native + NATIVE_GAP;
+    let bar = sanitised_mac_title_bar(app).content_left;
     let zoom = ctx.zoom_factor();
     let zoom = if zoom.is_finite() && (0.8..=2.0).contains(&zoom) { zoom } else { 1.0 };
-    (native + NATIVE_GAP) / zoom
+    measured.max(bar) / zoom
 }
 
 #[cfg(test)]
@@ -319,6 +352,32 @@ fn header_right_group(ui: &mut Ui, app: &mut WordApp, t: &Tokens, budget: Rect, 
     left
 }
 
+/// The macOS title bar as laid out around the traffic lights: its height and where content starts
+/// after the lights. The app measures the real buttons (they grew in macOS 26); until then, or if it
+/// can't, the standard layout above.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MacTitleBar {
+    pub height: f32,
+    pub content_left: f32,
+}
+
+impl Default for MacTitleBar {
+    fn default() -> Self {
+        Self { height: MAC_TITLE_BAR, content_left: MAC_CONTENT_LEFT }
+    }
+}
+
+impl MacTitleBar {
+    /// The bar for traffic lights whose right edge is `lights_right` and whose centre is
+    /// `lights_centre_y` below the top of the window: the lights centred in it, and content the
+    /// same gap after them as they keep from the top. Never smaller than the standard layout.
+    pub fn around_lights(lights_right: f32, lights_centre_y: f32, light: f32) -> Self {
+        let height = (2.0 * lights_centre_y).max(MAC_TITLE_BAR);
+        let gap = (height - light) / 2.0;
+        Self { height, content_left: (lights_right + gap).clamp(MAC_CONTENT_LEFT, f32::from(i8::MAX)) }
+    }
+}
+
 pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     // macOS: shorter, so the system's traffic lights are centred in it; the tallest controls
@@ -326,12 +385,14 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     let mac = app.integrated_titlebar;
     // macOS: no frame margin at all — the content is a floating sub-Ui that starts after the native
     // reservation, so nothing is truncated through an `i8` margin and no control or drag region
-    // reaches into the traffic lights' strip.
+    // reaches into the traffic lights' strip. The bar's height still follows the measured traffic
+    // lights (`MacTitleBar`), sanitised so a hostile measurement cannot collapse or explode it.
+    let bar = sanitised_mac_title_bar(app);
     let left = if mac { 0 } else { 8 };
     let reserve = if mac { native_reservation(app, ui.ctx()) } else { 0.0 };
     let control_h = if mac { 22.0 } else { 26.0 };
     egui::Panel::top("title_bar")
-        .exact_size(if mac { MAC_TITLE_BAR } else { 38.0 })
+        .exact_size(if mac { bar.height } else { 38.0 })
         .frame(egui::Frame::NONE.fill(t.title_bar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let panel = ui.max_rect();
@@ -456,7 +517,11 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing = vec2(14.0, 0.0);
                 let l = app.session.layout();
-                let page = l.caret_on(&app.session.sel.focus, app.session.page_hint).map(|c| c.page + 1).unwrap_or(1);
+                let page = if app.session.selects_whole_story() {
+                    app.session.page_hint.min(l.pages.len().saturating_sub(1)) + 1
+                } else {
+                    l.caret_on(&app.session.sel.focus, app.session.page_hint).map(|c| c.page + 1).unwrap_or(1)
+                };
                 let st = |ui: &mut Ui, s: &str| {
                     let font = TypeRung::Caption.regular();
                     let track = TypeRung::Caption.tracking();
@@ -581,6 +646,7 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                         ftrack,
                         t.text_dim,
                     );
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, focus));
                     if resp.clicked() {
                         let _ = app.run("view.focus", json!({}));
                     }
@@ -949,6 +1015,94 @@ mod tests {
     /// The reservation is a physical width: the same native 80 points plus the 8-point gap at every
     /// supported interface size, whatever the display's device pixels are. It also filters hostile
     /// values from the window (not a number, negative, zero, absurd) to the safe fallback.
+    /// The two native observations are combined: our own per-frame measurement of the lights' width
+    /// and upstream's measured `MacTitleBar::content_left`. The larger wins, so neither can shrink the
+    /// strip below what the other saw, and nonsense keeps the standard layout.
+    #[test]
+    fn native_reservation_combines_both_native_observations() {
+        let ctx = ctx();
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.integrated_titlebar = true;
+        ctx.set_zoom_factor(1.0);
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        // Standard layout on both sides: the 80-point fallback plus our gap.
+        a.native_lights = None;
+        a.mac_titlebar = MacTitleBar::default();
+        assert!((native_reservation(&a, &ctx) - (NATIVE_LIGHTS_W + NATIVE_GAP)).abs() < 0.01, "the default reservation changed");
+        // A macOS 26 measurement (content_left 89) wins over the 88-point fallback.
+        a.mac_titlebar = MacTitleBar::around_lights(78.0, 18.0, 14.0);
+        assert_eq!(a.mac_titlebar.height, 36.0);
+        assert!((native_reservation(&a, &ctx) - 89.0).abs() < 0.01, "the measured content_left was not honoured: {}", native_reservation(&a, &ctx));
+        // A wider lights measurement wins over the standard 70-point content start.
+        a.mac_titlebar = MacTitleBar::default();
+        a.native_lights = Some(egui::vec2(120.0, 28.0));
+        assert!((native_reservation(&a, &ctx) - 128.0).abs() < 0.01, "our own measurement was not honoured");
+        // Nonsense keeps the standard layout on both sides.
+        a.native_lights = Some(egui::vec2(f32::NAN, 28.0));
+        a.mac_titlebar = MacTitleBar { height: f32::NAN, content_left: -5.0 };
+        let bar = sanitised_mac_title_bar(&a);
+        assert_eq!(bar, MacTitleBar::default(), "a hostile measurement did not fall back to the standard layout");
+        assert!((native_reservation(&a, &ctx) - (NATIVE_LIGHTS_W + NATIVE_GAP)).abs() < 0.01);
+        // Absurd values are bounded, not honoured.
+        a.mac_titlebar = MacTitleBar { height: 10_000.0, content_left: 10_000.0 };
+        assert_eq!(sanitised_mac_title_bar(&a), MacTitleBar { height: MAC_TITLE_BAR, content_left: 400.0 });
+    }
+
+    /// The measured macOS 26 bar (36 points) is used by both the editor title bar and the Backstage
+    /// band, while the standard 28-point layout stays the default and the non-macOS bar stays 38.
+    #[test]
+    fn measured_mac_title_bar_height_reaches_both_bars() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.integrated_titlebar = true;
+        a.mac_titlebar = MacTitleBar::around_lights(78.0, 18.0, 14.0);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        HEADER_RECTS.with(|r| r.borrow_mut().clear());
+        h.run_steps(3);
+        h.run_steps(1);
+        let drag = HEADER_RECTS.with(|r| r.borrow().iter().find(|(n, _)| *n == "drag").map(|(_, r)| *r)).expect("the title bar's drag region");
+        assert!((drag.height() - 36.0).abs() < 1.5, "the measured bar's content is {:.1} points tall, not the measured 36", drag.height());
+        // The panel's own rect starts 8 points in (the app's root inset, as upstream's bar also does), so
+        // the contract here is that the measured content start is respected as a lower bound.
+        assert!(drag.min.x >= 89.0 - 0.5, "the measured content start was not honoured: {drag:?}");
+        // The same bar with the standard layout is a shorter one, so the measurement really reaches it.
+        let mut standard = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        standard.integrated_titlebar = true;
+        let mut hs = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            standard,
+        );
+        hs.run_steps(3);
+        HEADER_RECTS.with(|r| r.borrow_mut().clear());
+        hs.run_steps(1);
+        let standard_drag =
+            HEADER_RECTS.with(|r| r.borrow().iter().find(|(n, _)| *n == "drag").map(|(_, r)| *r)).expect("the standard bar's drag region");
+        assert!(
+            drag.height() > standard_drag.height() + 5.0,
+            "the measured 36-point bar ({:.1}) is not taller than the standard one ({:.1})",
+            drag.height(),
+            standard_drag.height()
+        );
+        // The Backstage band follows the same measured height.
+        h.state_mut().run("ui.backstage", json!({"value": true, "page": "home"})).unwrap();
+        crate::backstage::BACKSTAGE_RECTS.with(|b| b.borrow_mut().clear());
+        h.run_steps(3);
+        h.run_steps(1);
+        let band =
+            crate::backstage::BACKSTAGE_RECTS.with(|b| b.borrow().iter().find(|(n, _)| *n == "band").map(|(_, r)| *r)).expect("the Backstage band");
+        assert!((band.height() - 36.0).abs() < 0.5, "the Backstage band is {:.1} points tall, not the measured 36", band.height());
+    }
+
     #[test]
     fn native_reservation_is_zoom_correct_and_filters_hostile_values() {
         let ctx = ctx();
@@ -984,7 +1138,10 @@ mod tests {
             let r = native_reservation(&a, &ctx);
             assert!(r.is_finite() && r > 0.0 && r < 1000.0, "{case}: reservation {r} is not sane");
             let expected = lights.filter(|s| s.x.is_finite() && s.x > 0.0).map_or(NATIVE_LIGHTS_W, |s| s.x.clamp(1.0, 400.0));
-            assert!((r - (expected + NATIVE_GAP)).abs() < 0.01, "{case}: reservation {r} does not follow {expected}");
+            // The standard macOS content start (70 points) is a floor: a narrower lights measurement
+            // can never pull the strip below it, since upstream's `MacTitleBar` keeps its own floor.
+            let want = (expected + NATIVE_GAP).max(MAC_CONTENT_LEFT);
+            assert!((r - want).abs() < 0.01, "{case}: reservation {r} does not follow {want}");
         }
         // An invalid zoom falls back to 1 rather than dividing by nonsense.
         a.native_lights = None;
@@ -1024,5 +1181,18 @@ mod tests {
             heights[0],
             heights[1]
         );
+    }
+
+    #[test]
+    fn mac_title_bar_follows_the_measured_lights() {
+        // The standard lights give the standard bar.
+        let lights_end = MAC_LIGHTS_LEFT + 2.0 * MAC_LIGHT_PITCH + MAC_LIGHT;
+        assert_eq!(MacTitleBar::around_lights(lights_end, MAC_TITLE_BAR / 2.0, MAC_LIGHT), MacTitleBar::default());
+        // Larger, lower lights (macOS 26): a taller bar, and content clear of the green button.
+        let bar = MacTitleBar::around_lights(78.0, 18.0, 14.0);
+        assert_eq!(bar.height, 36.0);
+        assert_eq!(bar.content_left, 89.0);
+        // Never tighter than the standard layout.
+        assert_eq!(MacTitleBar::around_lights(40.0, 10.0, 12.0), MacTitleBar::default());
     }
 }

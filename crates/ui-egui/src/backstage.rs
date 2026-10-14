@@ -46,7 +46,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 // from them as the title bar's own controls, and the rest of the band drags the window.
                 // The band itself takes no input: the native traffic lights sit in its left part, so a
                 // click or drag there must reach AppKit rather than us.
-                let (band, _) = ui.allocate_exact_size(vec2(200.0, crate::chrome::MAC_TITLE_BAR), Sense::hover());
+                let (band, _) = ui.allocate_exact_size(vec2(200.0, crate::chrome::sanitised_mac_title_bar(app).height), Sense::hover());
                 let reserve = crate::chrome::native_reservation(app, ui.ctx());
                 // The whole 22-point hitbox starts after the shared reservation — the hitbox, not just
                 // the painted chevron, has to clear the native buttons.
