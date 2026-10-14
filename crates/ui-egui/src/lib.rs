@@ -381,6 +381,10 @@ pub struct WordApp {
     pub(crate) dialog_pick: Option<String>,
     /// macOS: the window has no title bar; leave room for the traffic lights.
     pub integrated_titlebar: bool,
+    /// The native macOS traffic lights' size in native-scale points, read from the window each frame
+    /// (see `chrome::native_reservation`). `None` off macOS or when the window cannot report it, in
+    /// which case the conservative fallback is used. Never saved to preferences.
+    pub native_lights: Option<egui::Vec2>,
     control_rx: Option<std::sync::mpsc::Receiver<ControlRequest>>,
     shot_token: u64,
     queued_shots: Vec<(u64, f64, u32)>,
@@ -499,6 +503,7 @@ impl WordApp {
             status_msg: None,
             previews: previews::Previews::default(),
             integrated_titlebar: false,
+            native_lights: None,
             control_rx: None,
             shot_token: 0,
             queued_shots: Vec::new(),
