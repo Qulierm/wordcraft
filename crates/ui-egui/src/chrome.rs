@@ -229,12 +229,44 @@ pub fn sanitised_mac_title_bar(app: &WordApp) -> MacTitleBar {
 /// 1.0, which is wrong for a fractional zoom such as the 0.5 a 100 % interface has on a 2× display.
 /// That known defect is reported, not silently repaired here.
 pub fn native_reservation(app: &WordApp, ctx: &egui::Context) -> f32 {
-    let native = app.native_lights.filter(|s| s.x.is_finite() && s.x > 0.0).map_or(NATIVE_LIGHTS_W, |s| s.x.clamp(1.0, 400.0));
-    let measured = native + NATIVE_GAP;
-    let bar = sanitised_mac_title_bar(app).content_left;
+    native_to_ui(native_exclusion(app), valid_zoom(ctx))
+}
+
+/// The interface zoom, or 1 when the context reports something unusable.
+fn valid_zoom(ctx: &egui::Context) -> f32 {
     let zoom = ctx.zoom_factor();
-    let zoom = if zoom.is_finite() && (0.8..=2.0).contains(&zoom) { zoom } else { 1.0 };
-    measured.max(bar) / zoom
+    if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 }
+}
+
+/// A native distance in egui points at `zoom`. Division by a hostile zoom is guarded: the unscaled
+/// native distance is returned rather than a non-finite or non-positive one.
+fn native_to_ui(native: f32, zoom: f32) -> f32 {
+    let ui = native / zoom;
+    if ui.is_finite() && ui > 0.0 { ui } else { native }
+}
+
+/// The native strip the macOS header and Backstage must leave free, in **native** points: the
+/// window's own measurement of the traffic lights plus the gap we keep after them, or the measured
+/// title-bar content start, whichever is larger. Kept in native points so the same physical distance
+/// stays free at every interface size.
+pub fn native_exclusion(app: &WordApp) -> f32 {
+    let measured = app.native_lights.filter(|s| s.x.is_finite() && s.x > 0.0).map_or(NATIVE_LIGHTS_W, |s| s.x.clamp(1.0, 400.0)) + NATIVE_GAP;
+    measured.max(sanitised_mac_title_bar(app).content_left)
+}
+
+/// The vertical room the native buttons need, in **native** points: the measured bar height, or the
+/// lights' own height when that is larger. Never below the standard 28-point bar.
+pub fn native_band_min(app: &WordApp) -> f32 {
+    let bar = sanitised_mac_title_bar(app).height;
+    let lights = app.native_lights.filter(|s| s.y.is_finite() && s.y > 0.0).map_or(0.0, |s| s.y.clamp(MAC_TITLE_BAR, 400.0));
+    bar.max(lights)
+}
+
+/// The macOS title band's height in egui points: the native minimum converted at the current zoom,
+/// and never less than the 28 points the controls need — so a reduced interface size enlarges the
+/// band instead of letting the tabs slide under the native buttons.
+pub fn mac_band_height(app: &WordApp, ctx: &egui::Context) -> f32 {
+    MAC_TITLE_BAR.max(native_to_ui(native_band_min(app), valid_zoom(ctx)))
 }
 
 #[cfg(test)]
@@ -289,9 +321,12 @@ fn header_right_group(ui: &mut Ui, app: &mut WordApp, t: &Tokens, budget: Rect, 
             #[cfg(test)]
             HEADER_RECTS.with(|h| h.borrow_mut().push(("account", r)));
             ui.painter().circle_filled(r.center(), control_h / 2.0 - 1.0, t.accent);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Account")));
             let initials: String = app.session.user_initials().chars().take(2).collect();
             ui.painter().text(r.center(), Align2::CENTER_CENTER, initials, semibold(10.5), t.on_accent);
-            resp.on_hover_text(format!("{} — set your name in File › Options", app.session.author));
+            if resp.on_hover_text(format!("{} — set your name in File › Options", app.session.author)).clicked() {
+                let _ = app.run("ui.backstage", json!({"value": true, "page": "options", "pane": "general"}));
+            }
             ui.add_space(8.0);
             left = r.min.x;
         }
@@ -387,15 +422,16 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     // reservation, so nothing is truncated through an `i8` margin and no control or drag region
     // reaches into the traffic lights' strip. The bar's height still follows the measured traffic
     // lights (`MacTitleBar`), sanitised so a hostile measurement cannot collapse or explode it.
-    let bar = sanitised_mac_title_bar(app);
     let left = if mac { 0 } else { 8 };
     let reserve = if mac { native_reservation(app, ui.ctx()) } else { 0.0 };
     let control_h = if mac { 22.0 } else { 26.0 };
     egui::Panel::top("title_bar")
-        .exact_size(if mac { bar.height } else { 38.0 })
+        .exact_size(if mac { mac_band_height(app, ui.ctx()) } else { 38.0 })
         .frame(egui::Frame::NONE.fill(t.title_bar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let panel = ui.max_rect();
+            #[cfg(test)]
+            HEADER_RECTS.with(|h| h.borrow_mut().push(("panel", panel)));
             let content = egui::Rect::from_min_max(egui::pos2((panel.min.x + reserve).min(panel.max.x), panel.min.y), panel.max);
             ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
                 // A child's `max_rect` is only a hint: on macOS the clip is what keeps painting and
@@ -482,14 +518,29 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                 };
                 let font = TypeRung::Chrome.semibold();
                 let track = TypeRung::Chrome.tracking();
-                let w = text_width(ui.painter(), &title, &font, track, t.text);
                 let cx = full.center().x;
-                if cx - w / 2.0 > qat_end + 10.0 && cx + w / 2.0 < right_start - 10.0 {
+                let available = 2.0 * (cx - qat_end - 10.0).min(right_start - 10.0 - cx);
+                let mut shown: String = title.chars().take(240).collect();
+                if text_width(ui.painter(), &shown, &font, track, t.text) > available {
+                    while !shown.is_empty() && text_width(ui.painter(), &format!("{shown}…"), &font, track, t.text) > available {
+                        shown.pop();
+                    }
+                    shown.push('…');
+                }
+                let w = text_width(ui.painter(), &shown, &font, track, t.text);
+                if available > 24.0 {
+                    let rect = Rect::from_center_size(pos2(cx, full.center().y), vec2(w + 8.0, control_h));
+                    let response = ui.interact(rect, ui.id().with("document_name"), Sense::click()).on_hover_text(tl!("Rename Document"));
+                    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &title));
+                    if response.clicked() {
+                        let _ = app.run("file.rename", json!({}));
+                    }
+
                     paint_text(
                         ui.painter(),
                         pos2(cx - w / 2.0, full.center().y - TypeRung::Chrome.line_height() / 2.0),
                         Align2::LEFT_TOP,
-                        &title,
+                        &shown,
                         &font,
                         track,
                         t.text,
@@ -553,7 +604,16 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                 }
                 // The language at the caret; a click sets the proofing language (Review › Language).
                 let lang = crate::ribbon::caret_language(app);
-                let resp = st(ui, &lang).on_hover_text(tl!("Language"));
+                let missing = crate::ribbon::caret_missing_dictionary(app);
+                let shown = if missing.is_some() { crate::i18n::fmt(tl!("{language} (no dictionary)"), &[("language", &lang)]) } else { lang.clone() };
+                let tip = match missing {
+                    Some(name) => crate::i18n::fmt(
+                        tl!("No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations."),
+                        &[("language", &lang), ("name", name)],
+                    ),
+                    None => tl!("Language").to_string(),
+                };
+                let resp = st(ui, &shown).on_hover_text(tip);
                 egui::Popup::menu(&resp).show(|ui| {
                     ui.set_min_width(200.0);
                     crate::ribbon::language_menu(ui, app);
@@ -793,7 +853,7 @@ mod tests {
                 let (zoom, rects) = header_case(width, percent, Some(egui::vec2(NATIVE_LIGHTS_W, 28.0)));
                 let edge = NATIVE_LIGHTS_W + NATIVE_GAP;
                 let case = format!("{width:.0}pt/{percent}%");
-                for (name, r) in &rects {
+                for (name, r) in rects.iter().filter(|(n, _)| *n != "panel") {
                     assert!(
                         r.min.x * zoom >= edge - 0.5,
                         "{case}: the {name} region starts at {:.1} egui points = {:.1} physical, inside the native strip",
@@ -854,7 +914,7 @@ mod tests {
                     }
                     assert!(r.min.x * zoom >= NATIVE_LIGHTS_W + NATIVE_GAP - 0.5, "{case}: the search field is inside the native strip");
                 }
-                for (name, r) in &rects {
+                for (name, r) in rects.iter().filter(|(n, _)| *n != "panel") {
                     assert!(r.width() >= 0.0 && r.height() >= 0.0, "{case}: the {name} rectangle is inverted: {r:?}");
                     assert!(r.min.x * zoom >= NATIVE_LIGHTS_W + NATIVE_GAP - 0.5, "{case}: the {name} region is inside the native strip");
                 }
@@ -888,7 +948,7 @@ mod tests {
                 let (zoom, rects) = header_case(width, percent, lights);
                 let measured = lights.filter(|s| s.x.is_finite() && s.x > 0.0).map_or(NATIVE_LIGHTS_W, |s| s.x.clamp(1.0, 400.0));
                 let edge = measured + NATIVE_GAP;
-                for (name, r) in &rects {
+                for (name, r) in rects.iter().filter(|(n, _)| *n != "panel") {
                     assert!(r.min.x.is_finite() && r.max.x.is_finite(), "{name} is not finite with {lights:?}");
                     assert!(r.min.x * zoom >= edge - 0.5, "{name} starts inside the {edge:.0}-point strip with {lights:?}");
                 }
@@ -985,7 +1045,7 @@ mod tests {
         let rects = header_rects();
         assert!(!rects.is_empty(), "the title bar recorded no rectangles");
         let edge = NATIVE_LIGHTS_W + NATIVE_GAP;
-        for (name, r) in rects {
+        for (name, r) in rects.iter().filter(|(n, _)| *n != "panel") {
             assert!(r.min.x >= edge - 0.01, "macOS: the {name} region starts at {:.1}, inside the native {edge:.0}-point strip", r.min.x);
         }
     }
@@ -998,7 +1058,7 @@ mod tests {
         for zoom in [0.8f32, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0] {
             let rects = header_rects_at(zoom);
             let edge = (NATIVE_LIGHTS_W + NATIVE_GAP) / zoom;
-            for (name, r) in rects {
+            for (name, r) in rects.iter().filter(|(n, _)| *n != "panel") {
                 // Compared in physical points, with half a point of slack for the pixel grid the
                 // content rect is rounded onto.
                 assert!(
@@ -1018,6 +1078,437 @@ mod tests {
     /// The two native observations are combined: our own per-frame measurement of the lights' width
     /// and upstream's measured `MacTitleBar::content_left`. The larger wins, so neither can shrink the
     /// strip below what the other saw, and nonsense keeps the standard layout.
+    /// The native clearance is a *native* distance: at any legitimate interface zoom the same
+    /// physical strip must stay free. A 100 % interface on a 2x display has zoom 0.5, so the strip
+    /// must be twice as wide in egui points, not the same.
+    #[test]
+    fn native_clearance_is_normalized_at_every_valid_zoom() {
+        let ctx = ctx();
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.integrated_titlebar = true;
+        a.native_lights = Some(egui::vec2(NATIVE_LIGHTS_W, 28.0));
+        a.mac_titlebar = MacTitleBar::default();
+        for zoom in [0.25f32, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0] {
+            ctx.set_zoom_factor(zoom);
+            ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+            let ui_points = native_reservation(&a, &ctx);
+            let native = ui_points * zoom;
+            assert!(
+                (native - (NATIVE_LIGHTS_W + NATIVE_GAP)).abs() < 0.5,
+                "at zoom {zoom} the clearance is {native:.1} native points, not {}",
+                NATIVE_LIGHTS_W + NATIVE_GAP
+            );
+        }
+        ctx.set_zoom_factor(1.0);
+    }
+
+    /// Pointer contracts at the two scales that matter: a 760-point window on a 1x display at 200 %
+    /// really draws at zoom 2, and the same width on a 2x display at 100 % draws at zoom 0.5. In both,
+    /// the header's controls must answer a real pointer, the native strip must stay free, and the
+    /// Backstage's back button and trailing drag must sit where the geometry says.
+    ///
+    /// The command-search part runs in its own harness: closing a dialog leaves the accessibility tree
+    /// one frame behind, and a fresh harness keeps that out of the rest of the checks.
+    #[test]
+    fn pointer_contracts_hold_at_true_zoom_two_and_at_retina_one_hundred() {
+        for (native, percent, want_zoom) in [(1.0f32, 200u32, 2.0f32), (2.0, 100, 0.5)] {
+            let case = format!("{native}x/{percent}%");
+            let app = || {
+                let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Hello")), crate::Services::default());
+                a.integrated_titlebar = true;
+                a.native_lights = Some(egui::vec2(NATIVE_LIGHTS_W, 28.0));
+                a.mac_titlebar = MacTitleBar::around_lights(78.0, 18.0, 14.0);
+                a.run("ui.interfaceSize", json!({"percent": percent})).unwrap();
+                a.run("caret.docEnd", json!({})).unwrap();
+                a.run("text.insert", json!({"text": " world"})).unwrap();
+                a
+            };
+            let harness = |a: WordApp| {
+                let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(760.0, 900.0)).with_pixels_per_point(native).build_ui_state(
+                    |ui, app: &mut WordApp| {
+                        let ctx = ui.ctx().clone();
+                        app.logic(&ctx);
+                        app.ui(ui);
+                    },
+                    a,
+                );
+                h.run_steps(3);
+                h
+            };
+            let click = |h: &mut egui_kittest::Harness<'_, WordApp>, pos: egui::Pos2| {
+                h.input_mut().events.push(egui::Event::PointerMoved(pos));
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                });
+                h.run_steps(1);
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                });
+                h.run_steps(2);
+            };
+            // Part 1: the search field opens the command search.
+            let mut h = harness(app());
+            let zoom = h.ctx.zoom_factor();
+            assert!((zoom - want_zoom).abs() < 0.01, "{case}: the app draws at zoom {zoom}, not {want_zoom}");
+            HEADER_RECTS.with(|r| r.borrow_mut().clear());
+            h.run_steps(1);
+            let rects = HEADER_RECTS.with(|r| r.borrow().clone());
+            let get = |n: &str| rects.iter().find(|(k, _)| *k == n).map(|(_, r)| *r);
+            let content = get("drag").expect("the header content");
+            assert!(content.min.x * zoom >= native_exclusion(h.state()) - 0.5, "{case}: the header starts inside the native strip");
+            let search = get("search").expect("a search field");
+            assert!(search.min.x >= content.min.x - 0.5 && search.max.x <= content.max.x + 0.5, "{case}: the search left the clipped header");
+            click(&mut h, search.center());
+            assert_eq!(
+                h.state().dialog.as_ref().map(crate::dialogs::Dialog::name),
+                Some("commands"),
+                "{case}: the search did not open the command search"
+            );
+            drop(h);
+            // Part 2: the toolbar's menu, the Undo list, the native strip and the Backstage.
+            let mut h = harness(app());
+            HEADER_RECTS.with(|r| r.borrow_mut().clear());
+            h.run_steps(1);
+            let rects = HEADER_RECTS.with(|r| r.borrow().clone());
+            let get = |n: &str| rects.iter().find(|(k, _)| *k == n).map(|(_, r)| *r);
+            let more = get("qat_more").expect("the toolbar menu button");
+            let qat_popup = qat_menu_button_id().with("popup");
+            click(&mut h, more.center());
+            assert!(egui::Popup::is_id_open(&h.ctx, qat_popup), "{case}: the toolbar menu did not open");
+            egui::Popup::close_id(&h.ctx, qat_popup);
+            h.run_steps(2);
+            let undo = get("qat_undo_list").expect("the Undo list button");
+            let undo_popup = undo_list_button_id().with("popup");
+            click(&mut h, undo.center());
+            assert!(egui::Popup::is_id_open(&h.ctx, undo_popup), "{case}: the Undo list did not open");
+            egui::Popup::close_id(&h.ctx, undo_popup);
+            h.run_steps(2);
+            // A click inside the native strip changes nothing of ours.
+            let before = (h.state().dialog.is_some(), h.state().session.undo_depth());
+            click(&mut h, egui::pos2(4.0, more.center().y));
+            assert_eq!((h.state().dialog.is_some(), h.state().session.undo_depth()), before, "{case}: a click in the native strip changed something");
+            drop(h);
+            // Part 3: the Backstage's geometry and its back button, in a harness of its own (the click
+            // closes the Backstage and takes the focused widget with it).
+            let mut a = app();
+            a.run("ui.backstage", json!({"value": true, "page": "home"})).unwrap();
+            let mut h = harness(a);
+            crate::backstage::BACKSTAGE_RECTS.with(|b| b.borrow_mut().clear());
+            h.run_steps(1);
+            let brects = crate::backstage::BACKSTAGE_RECTS.with(|b| b.borrow().clone());
+            let bget = |n: &str| brects.iter().find(|(k, _)| *k == n).map(|(_, r)| *r);
+            let band = bget("band").expect("the Backstage band");
+            let back = bget("back").expect("the back hitbox");
+            let drag = bget("drag").expect("the trailing drag region");
+            let reserve = native_reservation(h.state(), &h.ctx);
+            assert!(back.min.x * zoom >= native_exclusion(h.state()) - 0.5, "{case}: the back hitbox is inside the native strip");
+            assert!(back.max.x <= band.max.x + 0.5 && drag.max.x <= band.max.x + 0.5, "{case}: the band's hit areas left the column");
+            assert!(drag.width() >= 22.0 - 0.5, "{case}: too little room to drag");
+            assert!(band.width() >= reserve + 44.0 - 0.5, "{case}: the column is narrower than the strip plus the button and drag room");
+            click(&mut h, back.center());
+            assert!(!h.state().ui.backstage, "{case}: the back button did not leave the Backstage");
+        }
+    }
+
+    /// The whole supported interface range at every display scale, in one durable suite: AUTO and every
+    /// integer size from 50 % to 300 %, on 1x, 1.5x and 2x displays, at three window widths and with
+    /// both the standard and the measured macOS 26 bar. 252 settings × 3 densities × 3 widths × 2 bars
+    /// = 4536 configurations, driven through the app's own `ui.interfaceSize` command with settled
+    /// frames and per-frame recording buffers.
+    ///
+    /// What is asserted is the geometry that must hold everywhere: a real, positive zoom; the native
+    /// horizontal strip free (in native points, so the same physical distance at every size); the band
+    /// at least as tall as the native buttons need; every right-hand control inside the header's own
+    /// clip; and a search field that is either the full, a shortened or the 32-point icon-only one.
+    /// Oversized interfaces are not required to fit every raw toolbar rectangle — that is what the
+    /// bounded, clipped strip is for.
+    #[test]
+    fn scale_matrix_geometry_is_safe_at_every_supported_setting() {
+        let settings: Vec<Option<u16>> = std::iter::once(None).chain((50u16..=300).map(Some)).collect();
+        assert_eq!(settings.len(), 252, "AUTO plus every integer 50..300");
+        let mut checked = 0usize;
+        let mut backstage_checked = 0usize;
+        let mut compact = 0usize;
+        let mut hidden_community = 0usize;
+        for native in [1.0f32, 1.5, 2.0] {
+            for bar in ["default", "mac26"] {
+                for width in [760.0f32, 900.0, 1440.0] {
+                    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+                    a.integrated_titlebar = true;
+                    a.native_lights = Some(egui::vec2(NATIVE_LIGHTS_W, 28.0));
+                    a.mac_titlebar = if bar == "mac26" { MacTitleBar::around_lights(78.0, 18.0, 14.0) } else { MacTitleBar::default() };
+                    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(width, 900.0)).with_pixels_per_point(native).build_ui_state(
+                        |ui, app: &mut WordApp| {
+                            let ctx = ui.ctx().clone();
+                            app.logic(&ctx);
+                            app.ui(ui);
+                        },
+                        a,
+                    );
+                    h.run_steps(3);
+                    // Pass A: the editor's header.
+                    for setting in &settings {
+                        let case = format!("{native}x/{width:.0}pt/{bar}/{setting:?}");
+                        match setting {
+                            Some(pct) => h.state_mut().run("ui.interfaceSize", json!({"percent": pct})).unwrap(),
+                            None => h.state_mut().run("ui.interfaceSize", json!({"value": "auto"})).unwrap(),
+                        };
+                        h.run_steps(2);
+                        HEADER_RECTS.with(|r| r.borrow_mut().clear());
+                        h.run_steps(1);
+                        let rects = HEADER_RECTS.with(|r| r.borrow().clone());
+                        let get = |n: &str| rects.iter().find(|(k, _)| *k == n).map(|(_, r)| *r);
+                        let zoom = h.ctx.zoom_factor();
+                        assert!(zoom.is_finite() && zoom > 0.0, "{case}: zoom {zoom} is not usable");
+                        let content = get("drag").unwrap_or_else(|| panic!("{case}: no header content rect"));
+                        let exclusion = native_exclusion(h.state());
+                        let native_clear = content.min.x * zoom;
+                        assert!(
+                            native_clear >= exclusion - 0.5,
+                            "{case}: the header starts {native_clear:.1} native points in, but the strip needs {exclusion:.1}"
+                        );
+                        // The rects inside a panel are one point smaller than the panel's exact size
+                        // (its own separator stroke), so that point is accounted for in native terms.
+                        let panel = get("panel").unwrap_or_else(|| panic!("{case}: no header panel rect"));
+                        let band_native = panel.height() * zoom;
+                        let band_min = native_band_min(h.state());
+                        assert!(
+                            band_native >= band_min - zoom - 0.5,
+                            "{case}: the band is {band_native:.1} native points tall, but the buttons need {band_min:.1}"
+                        );
+                        assert!(content.min.x.is_finite() && content.max.x.is_finite(), "{case}: the header content is not finite");
+                        // Every right-hand control stays inside the header's own clipped content.
+                        for name in ["search", "account", "discord"] {
+                            if let Some(r) = get(name) {
+                                assert!(
+                                    r.min.x >= content.min.x - 0.5 && r.max.x <= content.max.x + 0.5,
+                                    "{case}: the {name} control left the clipped header: {r:?} vs {content:?}"
+                                );
+                                assert!(r.width() >= 0.0 && r.height() >= 0.0, "{case}: the {name} rectangle is inverted");
+                            }
+                        }
+                        if let Some(search) = get("search") {
+                            let w = search.width();
+                            assert!(
+                                (w - 260.0).abs() < 0.5 || (w - 32.0).abs() < 0.5 || (160.0..260.0).contains(&w),
+                                "{case}: the search field is {w:.1} wide, which is neither the full, a shortened nor the compact one"
+                            );
+                            if (w - 32.0).abs() < 0.5 {
+                                compact += 1;
+                            }
+                        }
+                        if get("discord").is_none() {
+                            hidden_community += 1;
+                        }
+                        checked += 1;
+                    }
+                    // Pass B: the Backstage at every setting, in the same settled harness.
+                    h.state_mut().run("ui.backstage", json!({"value": true, "page": "home"})).unwrap();
+                    h.run_steps(3);
+                    for setting in &settings {
+                        let case = format!("{native}x/{width:.0}pt/{bar}/backstage/{setting:?}");
+                        match setting {
+                            Some(pct) => h.state_mut().run("ui.interfaceSize", json!({"percent": pct})).unwrap(),
+                            None => h.state_mut().run("ui.interfaceSize", json!({"value": "auto"})).unwrap(),
+                        };
+                        h.run_steps(2);
+                        crate::backstage::BACKSTAGE_RECTS.with(|b| b.borrow_mut().clear());
+                        h.run_steps(1);
+                        let rects = crate::backstage::BACKSTAGE_RECTS.with(|b| b.borrow().clone());
+                        let get = |n: &str| rects.iter().find(|(k, _)| *k == n).map(|(_, r)| *r);
+                        let zoom = h.ctx.zoom_factor();
+                        assert!(zoom.is_finite() && zoom > 0.0, "{case}: zoom {zoom} is not usable");
+                        let band = get("band").unwrap_or_else(|| panic!("{case}: no Backstage band"));
+                        let back = get("back").unwrap_or_else(|| panic!("{case}: no back hitbox"));
+                        let drag = get("drag").unwrap_or_else(|| panic!("{case}: no trailing drag region"));
+                        let reserve = native_reservation(h.state(), &h.ctx);
+                        assert!(
+                            band.width() >= reserve + 44.0 - 0.5,
+                            "{case}: the column is {:.1} points, narrower than the strip plus the button and drag room ({reserve:.1} + 44)",
+                            band.width()
+                        );
+                        assert!(
+                            band.width() * zoom >= native_exclusion(h.state()) + 22.0 * zoom - 0.5,
+                            "{case}: the column does not clear the native strip in native points"
+                        );
+                        let back_native = back.min.x * zoom;
+                        assert!(
+                            back_native >= native_exclusion(h.state()) - 0.5,
+                            "{case}: the back hitbox starts {back_native:.1} native points in, inside the strip"
+                        );
+                        assert!(back.max.x <= band.max.x + 0.5, "{case}: the back hitbox left the column: {back:?} vs {band:?}");
+                        assert!(drag.min.x >= back.max.x - 0.5, "{case}: the drag region overlaps the back button");
+                        assert!(drag.max.x <= band.max.x + 0.5, "{case}: the drag region left the column");
+                        assert!(drag.width() >= 22.0 - 0.5, "{case}: only {:.1} points are left to drag", drag.width());
+                        assert!(band.min.x.is_finite() && band.max.x.is_finite(), "{case}: the band is not finite");
+                        backstage_checked += 1;
+                    }
+                    h.state_mut().run("ui.backstage", json!({"value": false})).unwrap();
+                    h.run_steps(2);
+                }
+            }
+        }
+        assert_eq!(checked, 4536, "the whole editor matrix must run");
+        assert_eq!(backstage_checked, 4536, "the whole Backstage matrix must run");
+        // Sanity: the suite really visits the narrow and the roomy ends of the range.
+        assert!(compact > 0, "no configuration reached the icon-only search");
+        assert!(hidden_community > 0, "no configuration hid the community button");
+    }
+
+    /// Native density is not interface zoom: on a 1x display AUTO draws at zoom 1, while on a 2x
+    /// display the app divides a chosen 100 % by the display's scale, giving zoom 0.5 — and the strip
+    /// is then twice as wide in egui points so the *native* distance stays the same.
+    #[test]
+    fn display_density_and_interface_zoom_are_distinct() {
+        let strip = |native: f32, setting: &str| {
+            let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+            a.integrated_titlebar = true;
+            a.native_lights = Some(egui::vec2(NATIVE_LIGHTS_W, 28.0));
+            a.run("ui.interfaceSize", json!({"value": setting})).unwrap();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 900.0)).with_pixels_per_point(native).build_ui_state(
+                |ui, app: &mut WordApp| {
+                    let ctx = ui.ctx().clone();
+                    app.logic(&ctx);
+                    app.ui(ui);
+                },
+                a,
+            );
+            h.run_steps(3);
+            HEADER_RECTS.with(|r| r.borrow_mut().clear());
+            h.run_steps(1);
+            let content = HEADER_RECTS.with(|r| r.borrow().iter().find(|(n, _)| *n == "drag").map(|(_, r)| *r)).expect("the header content");
+            (h.ctx.zoom_factor(), h.ctx.pixels_per_point(), content.min.x)
+        };
+        let (zoom1, ppp1, points1) = strip(1.0, "auto");
+        let (zoom2, ppp2, points2) = strip(2.0, "auto");
+        assert!((zoom1 - 1.0).abs() < 0.01 && (zoom2 - 1.0).abs() < 0.01, "AUTO follows the display, it does not scale the UI: {zoom1} / {zoom2}");
+        assert!((ppp1 - 1.0).abs() < 0.01 && (ppp2 - 2.0).abs() < 0.01, "the display scale must reach the context: {ppp1} / {ppp2}");
+        assert!((points1 - points2).abs() < 0.5, "AUTO on a 2x display lays out the same egui points: {points1} vs {points2}");
+        let (zoom100_at_1x, _, points100_at_1x) = strip(1.0, "100");
+        let (zoom100_at_2x, _, points100_at_2x) = strip(2.0, "100");
+        assert!((zoom100_at_1x - 1.0).abs() < 0.01, "100 % on a 1x display is zoom 1, not {zoom100_at_1x}");
+        assert!((zoom100_at_2x - 0.5).abs() < 0.01, "100 % on a 2x display is zoom 0.5, not {zoom100_at_2x}");
+        // The strip itself doubles in egui points; the window's own 8-point inset does not, so the
+        // measured content start grows by slightly less than exactly twice.
+        assert!(
+            points100_at_2x >= 1.85 * points100_at_1x,
+            "the native strip must be about twice as wide in egui points at zoom 0.5: {points100_at_1x} vs {points100_at_2x}"
+        );
+        assert!(
+            points100_at_1x * zoom100_at_1x >= NATIVE_LIGHTS_W + NATIVE_GAP - 0.5
+                && points100_at_2x * zoom100_at_2x >= NATIVE_LIGHTS_W + NATIVE_GAP - 0.5,
+            "the native clearance must hold at both densities: {} vs {}",
+            points100_at_1x * zoom100_at_1x,
+            points100_at_2x * zoom100_at_2x
+        );
+    }
+
+    /// Hostile zoom values never produce a nonsense reservation. egui itself cannot lay out a
+    /// non-finite zoom (its own layout panics), so the guard is exercised at the conversion level,
+    /// which is where our code applies it; valid fractional and large zooms are checked through the
+    /// real context.
+    #[test]
+    fn native_conversion_survives_hostile_zoom_and_metrics() {
+        for zoom in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0] {
+            assert_eq!(native_to_ui(88.0, zoom), 88.0, "zoom {zoom} must fall back to the unscaled native distance");
+        }
+        let ctx = ctx();
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.integrated_titlebar = true;
+        a.native_lights = Some(egui::vec2(NATIVE_LIGHTS_W, 28.0));
+        // A tiny but valid zoom scales up instead of clamping, and a large one scales down.
+        for (zoom, factor) in [(0.25f32, 4.0f32), (0.5, 2.0), (2.0, 0.5), (4.0, 0.25)] {
+            ctx.set_zoom_factor(zoom);
+            ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+            let want = (NATIVE_LIGHTS_W + NATIVE_GAP) * factor;
+            assert!(
+                (native_reservation(&a, &ctx) - want).abs() < 0.5,
+                "at zoom {zoom} the strip is {:.1}, not {want:.1}",
+                native_reservation(&a, &ctx)
+            );
+            assert!(mac_band_height(&a, &ctx) >= MAC_TITLE_BAR, "at zoom {zoom} the band fell below its minimum");
+        }
+        // Hostile native metrics keep the standard layout on both axes.
+        a.native_lights = Some(egui::vec2(f32::NAN, f32::NAN));
+        a.mac_titlebar = MacTitleBar { height: f32::NAN, content_left: -1.0 };
+        assert_eq!(native_exclusion(&a), NATIVE_LIGHTS_W + NATIVE_GAP);
+        assert_eq!(native_band_min(&a), MAC_TITLE_BAR);
+        a.native_lights = Some(egui::vec2(10_000.0, 10_000.0));
+        a.mac_titlebar = MacTitleBar { height: 10_000.0, content_left: 10_000.0 };
+        assert_eq!(native_exclusion(&a), 408.0, "absurd measurements are bounded, not honoured");
+        assert_eq!(native_band_min(&a), 400.0);
+        ctx.set_zoom_factor(1.0);
+    }
+
+    /// The Backstage column widens with the native strip so the back button stays clear of the
+    /// native buttons and the page content stays clear of the strip, at every interface size.
+    #[test]
+    fn backstage_nav_keeps_the_back_button_and_content_clear() {
+        for (percent, want_nav_at_least) in [(50u32, 200.0f32), (100, 200.0), (200, 200.0)] {
+            let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+            a.integrated_titlebar = true;
+            a.native_lights = Some(egui::vec2(NATIVE_LIGHTS_W, 28.0));
+            a.run("ui.interfaceSize", json!({"percent": percent})).unwrap();
+            a.run("ui.backstage", json!({"value": true, "page": "home"})).unwrap();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 900.0)).build_ui_state(
+                |ui, app: &mut WordApp| {
+                    let ctx = ui.ctx().clone();
+                    app.logic(&ctx);
+                    app.ui(ui);
+                },
+                a,
+            );
+            h.run_steps(3);
+            crate::backstage::BACKSTAGE_RECTS.with(|b| b.borrow_mut().clear());
+            h.run_steps(1);
+            let rects = crate::backstage::BACKSTAGE_RECTS.with(|b| b.borrow().clone());
+            let get = |n: &str| rects.iter().find(|(k, _)| *k == n).map(|(_, r)| *r);
+            let band = get("band").expect("the Backstage band");
+            let back = get("back").expect("the back hitbox");
+            let drag = get("drag").expect("the trailing drag region");
+            let zoom = h.ctx.zoom_factor();
+            let reserve = native_reservation(h.state(), &h.ctx);
+            let case = format!("{percent}% (zoom {zoom})");
+            assert!(band.width() >= want_nav_at_least - 0.5, "{case}: the column is {:.1} wide", band.width());
+            assert!(
+                band.width() >= reserve + 44.0 - 0.5,
+                "{case}: the column {:.1} is narrower than the strip plus the button and drag room",
+                band.width()
+            );
+            assert!(back.min.x >= band.min.x + reserve - 0.5, "{case}: the back hitbox starts inside the native strip: {back:?}");
+            assert!(back.max.x <= band.max.x + 0.5, "{case}: the back hitbox left the column");
+            assert!(drag.width() >= 22.0 - 0.5, "{case}: only {:.1} points are left to drag", drag.width());
+            assert!(drag.min.x >= back.max.x - 0.5, "{case}: the drag region overlaps the back button");
+            assert!(drag.max.x <= band.max.x + 0.5, "{case}: the drag region left the column");
+        }
+    }
+
+    /// The macOS band keeps room for the native buttons vertically too: the band's egui height is the
+    /// measured native height converted at the current zoom, never smaller than the 28-point minimum
+    /// the controls need.
+    #[test]
+    fn mac_band_height_keeps_native_room_at_small_zoom() {
+        let ctx = ctx();
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.integrated_titlebar = true;
+        // The macOS 26 measurement: a 36-point native bar.
+        a.mac_titlebar = MacTitleBar::around_lights(78.0, 18.0, 14.0);
+        a.native_lights = Some(egui::vec2(NATIVE_LIGHTS_W, 36.0));
+        for (zoom, want) in [(0.5f32, 72.0f32), (1.0, 36.0), (2.0, 28.0)] {
+            ctx.set_zoom_factor(zoom);
+            ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+            let h = mac_band_height(&a, &ctx);
+            assert!((h - want).abs() < 0.5, "at zoom {zoom} the band is {h:.1} points, not {want:.1}");
+        }
+        ctx.set_zoom_factor(1.0);
+    }
+
     #[test]
     fn native_reservation_combines_both_native_observations() {
         let ctx = ctx();

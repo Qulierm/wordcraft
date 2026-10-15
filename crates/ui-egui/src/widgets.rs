@@ -99,6 +99,7 @@ pub fn enabled(app: &WordApp, id: &str) -> bool {
         // Zotero: one command at a time, and only in the desktop app.
         None if id.starts_with("ui.zotero.") => app.zotero.busy.is_none() && !cfg!(target_arch = "wasm32"),
         None if id == "ui.linkTextBox" => enabled(app, "shape.link"),
+        None if id == "ui.crop" => crate::crop::can_toggle(app),
         None => id.starts_with("ui."),
     }
 }
@@ -300,6 +301,7 @@ pub fn menu_button(
         resp
     };
     let resp = resp.on_hover_text(tip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, on, tip));
     if !on {
         return;
     }
@@ -536,6 +538,10 @@ pub fn combo(
 /// caller runs `font.add`, which shows a file picker. Not a family name anyone can type.
 pub const ADD_FONT: &str = "\u{1}font.add";
 
+/// What [`font_combo`] returns when "Load System Installed Fonts…" is chosen on web: the
+/// caller runs `font.loadSystem`.
+pub const LOAD_SYSTEM_FONTS: &str = "\u{1}font.loadSystem";
+
 /// The font box: a [`combo`] where typing lists the matching families under the field (#359).
 /// Its list ends with Add Font… ([`ADD_FONT`]).
 /// Up/Down move the highlight, Enter or a click applies the highlighted family ("arial" applies
@@ -635,6 +641,13 @@ fn combo_impl(
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        // The field and its arrow share one outline: rounded on the outside, square where they
+        // meet. The field's frame takes the widget visuals' radius in every state.
+        let w = &mut ui.visuals_mut().widgets;
+        for v in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            v.corner_radius.ne = 0;
+            v.corner_radius.se = 0;
+        }
         // Up/Down move the list's highlight: take them before the text field moves its cursor.
         let mut step = 0i32;
         if s.open && ui.memory(|m| m.has_focus(te_id)) {
@@ -753,6 +766,11 @@ fn combo_impl(
                 ui.separator();
                 if ui.button(tl!("Add Font…")).clicked() {
                     out = Some(ADD_FONT.to_string());
+                    ui.close();
+                }
+                #[cfg(target_arch = "wasm32")]
+                if ui.button(tl!("Load System Installed Fonts…")).clicked() {
+                    out = Some(LOAD_SYSTEM_FONTS.to_string());
                     ui.close();
                 }
             }
@@ -966,6 +984,7 @@ fn icon_text_button_with(ui: &mut Ui, icon: &str, text: &str, font: egui::FontId
     let marker_w = if marker { DROPDOWN + 4.0 } else { 0.0 };
     let size = vec2(pad.x + icon_w + 4.0 + galley.size().x + marker_w + pad.x, galley.size().y.max(icon_w) + 2.0 * pad.y);
     let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
     let st = drawn_state(ui, &resp, true);
     let r = r.expand(st.expansion);
     ui.painter().rect(r, ui.visuals().widgets.inactive.corner_radius, st.fill, st.stroke, egui::StrokeKind::Inside);
