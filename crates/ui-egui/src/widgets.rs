@@ -712,7 +712,8 @@ fn combo_impl(
         let arrow_rect = Rect::from_min_max(pos2(outer.max.x - COMBO_ARROW_W, outer.min.y), outer.max);
         let aresp = ui.interact(arrow_rect, ui.id().with(("combo_arrow", id)), Sense::click());
         // The accessible label is translated display text; `id` remains an internal stable key.
-        aresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        let arrow_enabled = ui.is_enabled();
+        aresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, arrow_enabled, label));
         #[cfg(test)]
         COMBO_RECTS.with(|c| c.borrow_mut().push((id.to_string(), outer, text_rect, arrow_rect)));
         // The base and the arrow's own hover/pressed feedback go under the text; the single outline
@@ -1351,6 +1352,63 @@ mod tests {
                 assert_eq!(buttons, vec![label.to_owned()], "{code} API {api} should expose one actual arrow button");
                 assert!(!buttons[0].contains(id), "the internal id must not leak: {buttons:?}");
                 assert!(!buttons[0].ends_with(" list"), "the old English suffix must not be appended: {buttons:?}");
+            }
+        }
+    }
+
+    /// Parent UI enablement is exposed on each actual AccessKit combo-arrow button without changing
+    /// its translated label or stable node identity through an enabled/disabled/enabled cycle.
+    #[test]
+    fn editable_combo_arrows_report_inherited_enabled_state() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::{NodeT, Queryable};
+
+        fn assert_arrow_state(h: &egui_kittest::Harness<'_, bool>, label: &str, enabled: bool, stable_id: &mut Option<String>) {
+            let buttons: Vec<_> = h.query_all_by_role(Role::Button).filter(|node| node.accesskit_node().label().as_deref() == Some(label)).collect();
+            assert_eq!(buttons.len(), 1, "one actual AccessKit arrow button labelled {label:?}");
+            let node = buttons[0].accesskit_node();
+            assert_eq!(node.label().as_deref(), Some(label), "the translated caller label is unchanged");
+            assert_eq!(node.is_disabled(), !enabled, "the arrow reflects parent UI enablement");
+            let id = format!("{:?}", node.id());
+            if let Some(expected) = stable_id {
+                assert_eq!(&id, expected, "the AccessKit node id is stable across enabled-state changes");
+            } else {
+                *stable_id = Some(id);
+            }
+        }
+
+        let fonts: Vec<String> = ["Arial", "Courier New"].map(String::from).to_vec();
+        let sizes: Vec<String> = ["10", "12"].map(String::from).to_vec();
+        let recent: Vec<String> = ["Georgia"].map(String::from).to_vec();
+        for code in ["en", "ru"] {
+            let lang = crate::i18n::Lang::from_code(code).expect("the test language is registered");
+            for (api, id, key) in [(0, "internal_size_42", "Font Size"), (1, "internal_font_17", "Font"), (2, "recent_key_99", "Asian text font:")] {
+                let label = crate::i18n::tr(lang, key).to_owned();
+                let mut h = egui_kittest::Harness::builder().with_size(vec2(260.0, 48.0)).build_ui_state(
+                    |ui, parent_enabled: &mut bool| {
+                        ui.add_enabled_ui(*parent_enabled, |ui| match api {
+                            0 => {
+                                let _ = combo(ui, id, &label, 120.0, "12", &sizes, None);
+                            }
+                            1 => {
+                                let _ = font_combo(ui, id, &label, 150.0, "Arial", &fonts, None);
+                            }
+                            _ => {
+                                let _ = font_combo_with_recent(ui, id, &label, 150.0, "Arial", &fonts, &recent, None);
+                            }
+                        });
+                    },
+                    true,
+                );
+                let mut stable_id = None;
+                h.run_steps(2);
+                assert_arrow_state(&h, &label, true, &mut stable_id);
+                *h.state_mut() = false;
+                h.run_steps(2);
+                assert_arrow_state(&h, &label, false, &mut stable_id);
+                *h.state_mut() = true;
+                h.run_steps(2);
+                assert_arrow_state(&h, &label, true, &mut stable_id);
             }
         }
     }

@@ -687,4 +687,4 @@ Ranked, to beta (detail and remaining milestones in [docs/roadmap.md](docs/roadm
 | 2026-10-12 | trivial | Progress log: recipient filter and sort, .xls and legacy-encoding recipient lists (#778) |
 | 2026-10-15 | trivial | Progress log: dialog close box (#1885) |
 | 2026-10-15 | trivial | Progress log: mixed Hebrew/Latin text keeps its order in Word (#1543) |
-| 2026-07-14 | trivial | Headless EN/RU AccessKit checks confirm localized editable-combo arrow names; no real screen-reader run, no gap #18 closure |
+| 2026-07-14 | trivial | Headless EN/RU AccessKit checks confirm localized editable-combo arrow names and inherited disabled state; no real screen-reader run, no gap #18 closure |
