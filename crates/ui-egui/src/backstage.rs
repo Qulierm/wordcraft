@@ -31,6 +31,13 @@ thread_local! {
 /// needs more room than that (see `show`).
 const BACKSTAGE_NAV_W: f32 = 200.0;
 
+/// The chevron centre from the normalized native reservation. In full screen the traffic lights
+/// aren't docked at the top-left, so use the plain 26-point control inset instead.
+fn back_chevron_c(band_min_x: f32, center_y: f32, fullscreen: bool, reservation: f32) -> egui::Pos2 {
+    let x = if fullscreen { 26.0 } else { reservation + 11.0 };
+    pos2(band_min_x + x, center_y)
+}
+
 pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let recovery = app.ui.backstage_page == "recover";
@@ -40,11 +47,12 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         app.ui.backstage_page = "home".into();
     }
     let mac = app.integrated_titlebar;
-    // The navigation column is as wide as Word's 200 points, but never narrower than the native
-    // strip plus the back button and the room to drag after it — at a reduced interface size the
-    // reservation grows, and the column grows with it so the back button stays clear of the native
-    // buttons and the page content stays clear of the strip.
-    let nav_w = if mac { BACKSTAGE_NAV_W.max(crate::chrome::native_reservation(app, ui.ctx()) + 44.0) } else { BACKSTAGE_NAV_W };
+    let fullscreen = mac && app.session.view.full_screen;
+    // Only windowed macOS reserves room for the traffic lights. native_reservation is normalized to
+    // the actual interface zoom; full screen uses Word's plain 200-point navigation column.
+    let reserve = if mac && !fullscreen { crate::chrome::native_reservation(app, ui.ctx()) } else { 0.0 };
+    // The windowed column is wide enough for the native strip, the 22-point back hitbox and room to drag.
+    let nav_w = if mac { BACKSTAGE_NAV_W.max(reserve + 44.0) } else { BACKSTAGE_NAV_W };
     egui::Panel::left("backstage_nav")
         .exact_size(nav_w)
         // Fixed width, as in Word: without this egui shows a resize handle that does nothing (#502).
@@ -63,13 +71,13 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 // The band itself takes no input: the native traffic lights sit in its left part, so a
                 // click or drag there must reach AppKit rather than us.
                 let (band, _) = ui.allocate_exact_size(vec2(nav_w, crate::chrome::mac_band_height(app, ui.ctx())), Sense::hover());
-                let reserve = crate::chrome::native_reservation(app, ui.ctx());
-                // The whole 22-point hitbox starts after the shared reservation — the hitbox, not just
-                // the painted chevron, has to clear the native buttons.
-                let hit = Rect::from_min_size(pos2(band.min.x + reserve, band.min.y), vec2(22.0, band.height()));
+                // The helper returns the centre used by both the full 22-point hitbox and the chevron
+                // art, so windowed native clearance and the full-screen inset cannot drift apart.
+                let center = back_chevron_c(band.min.x, band.center().y, fullscreen, reserve);
+                let hit = Rect::from_center_size(center, vec2(22.0, band.height()));
                 let resp = ui.interact(hit, ui.id().with("backstage_back"), Sense::click());
-                // Dragging the window is registered only in the band's remaining safe part, right of
-                // the back button; with no room left nothing is registered at all.
+                // Windowed dragging is restricted to the safe part right of the back hitbox; in full
+                // screen the same rule leaves the 15..37-point button area non-draggable.
                 let drag = Rect::from_min_max(pos2(hit.max.x, band.min.y), band.max);
                 let drag = if drag.width() > 1.0 { Some(drag) } else { None };
                 if drag.map(|r| ui.interact(r, ui.id().with("backstage_drag"), Sense::click_and_drag())).is_some_and(|d| d.drag_started()) {
@@ -85,7 +93,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 });
                 icons::paint(
                     ui.painter(),
-                    Rect::from_center_size(hit.center(), vec2(18.0, 18.0)),
+                    Rect::from_center_size(center, vec2(18.0, 18.0)),
                     "chevronLeft",
                     egui::Color32::WHITE,
                     egui::Color32::WHITE,
@@ -225,6 +233,9 @@ fn recovery_page(app: &mut WordApp, ui: &mut Ui) {
             ui.label(&doc.name);
             ui.label(&doc.saved_at);
             ui.add_enabled_ui(!busy, |ui| {
+                // Buttons keep the theme's own text colour: the page-wide white override is
+                // for labels on the black background and would bleach button labels (#1895).
+                ui.visuals_mut().override_text_color = None;
                 ui.horizontal(|ui| {
                     if ui.button(tl!("Restore")).clicked() {
                         let _ = app.run("file.recover", json!({"restore": doc.id}));
@@ -239,6 +250,7 @@ fn recovery_page(app: &mut WordApp, ui: &mut Ui) {
     });
     ui.add_space(20.0);
     ui.horizontal(|ui| {
+        ui.visuals_mut().override_text_color = None;
         if ui.button(tl!("Continue without restoring")).clicked() {
             let _ = app.run("ui.backstage", json!({"value": false}));
             app.canvas.want_focus = true;
@@ -525,6 +537,16 @@ mod tests {
     use super::{BACKSTAGE_RECTS, matching_templates};
     use crate::{Services, WordApp};
 
+    /// #1873: windowed placement uses the normalized native reservation; full screen ignores it.
+    #[test]
+    fn back_chevron_uses_native_reservation_only_windowed() {
+        let windowed = super::back_chevron_c(0.0, 14.0, false, 62.0);
+        assert_eq!((windowed.x, windowed.y), (73.0, 14.0));
+        let full = super::back_chevron_c(0.0, 14.0, true, 62.0);
+        assert_eq!((full.x, full.y), (26.0, 14.0));
+        assert!(full.x < windowed.x);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn recovery_app() -> (WordApp, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
@@ -649,10 +671,11 @@ mod tests {
     /// Runs the macOS Backstage (integrated title bar) at the given interface size and returns the
     /// zoom the app actually used plus the band rectangles it laid out. The interface size goes
     /// through the app's own command, because the app sets the zoom itself every frame.
-    fn backstage_rects_at(percent: u32) -> (f32, Vec<(&'static str, egui::Rect)>) {
+    fn backstage_rects_at(percent: u32, fullscreen: bool) -> (f32, Vec<(&'static str, egui::Rect)>) {
         let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
         a.integrated_titlebar = true;
         a.native_lights = Some(egui::vec2(crate::chrome::NATIVE_LIGHTS_W, 28.0));
+        a.session.view.full_screen = fullscreen;
         a.run("ui.backstage", json!({"value": true, "page": "home"})).unwrap();
         a.run("ui.interfaceSize", json!({"percent": percent})).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
@@ -675,7 +698,7 @@ mod tests {
     #[test]
     fn mac_backstage_back_button_clears_the_native_traffic_lights() {
         for percent in [80u32, 90, 100, 110, 125, 150, 175, 200] {
-            let (zoom, rects) = backstage_rects_at(percent);
+            let (zoom, rects) = backstage_rects_at(percent, false);
             assert!((zoom - percent as f32 / 100.0).abs() < 0.01, "the {percent}% interface size did not apply: zoom {zoom:.2}");
             assert!(!rects.is_empty(), "the macOS Backstage band recorded no rectangles");
             assert!(rects.iter().any(|(n, _)| *n == "back"), "the back hitbox was recorded");
@@ -696,6 +719,22 @@ mod tests {
                 assert!(drag.min.x >= back.max.x - 0.01, "at {percent}% the drag region {drag:?} overlaps the back hitbox {back:?}");
             }
         }
+    }
+
+    /// Full screen drops the windowed native reservation but keeps the whole 22-point hitbox and
+    /// starts the drag region immediately to its right.
+    #[test]
+    fn mac_backstage_fullscreen_uses_plain_control_inset() {
+        let (zoom, rects) = backstage_rects_at(100, true);
+        assert!((zoom - 1.0).abs() < 0.01, "the 100% interface size did not apply: zoom {zoom:.2}");
+        let band = rects.iter().find(|(name, _)| *name == "band").expect("the Backstage band").1;
+        let back = rects.iter().find(|(name, _)| *name == "back").expect("the full back hitbox").1;
+        let drag = rects.iter().find(|(name, _)| *name == "drag").expect("the drag region").1;
+        assert!((band.width() - 200.0).abs() < 0.01, "full-screen navigation width is not 200 points: {band:?}");
+        assert!((back.min.x - band.min.x - 15.0).abs() < 0.01, "the hitbox does not start at 15 points: {back:?} vs {band:?}");
+        assert!((back.max.x - band.min.x - 37.0).abs() < 0.01, "the hitbox does not end at 37 points: {back:?} vs {band:?}");
+        assert!((back.width() - 22.0).abs() < 0.01, "the hitbox is not 22 points wide: {back:?}");
+        assert!((drag.min.x - back.max.x).abs() < 0.01, "the drag region does not start after the hitbox: {drag:?} vs {back:?}");
     }
 
     /// The macOS band's native strip takes no input of ours: a click and a drag started inside the
@@ -993,17 +1032,17 @@ mod tests {
         h.get_by_label("Close").click();
         h.run_steps(4);
         assert!(matches!(h.state().dialog, Some(crate::dialogs::Dialog::SaveChanges { .. })), "unsaved changes ask first");
-        assert!(!h.state().quit_requested);
+        assert!(h.state().has_document());
 
         h.state_mut().run("ui.saveChanges", json!({"answer": "cancel"})).unwrap();
         h.run_steps(4);
-        assert!(!h.state().quit_requested, "Cancel keeps the document open");
+        assert!(h.state().has_document(), "Cancel keeps the document open");
         assert!(h.state().ui.backstage && h.state().ui.backstage_page == "info", "Cancel leaves the Backstage as it was");
 
         h.get_by_label("Close").click();
         h.run_steps(4);
         h.state_mut().run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
-        assert!(h.state().quit_requested, "Don't Save closes");
+        assert!(!h.state().has_document() && !h.state().quit_requested, "Don't Save closes the document, not the window (#1712)");
     }
 
     /// A document without unsaved changes closes without a prompt.
@@ -1023,7 +1062,7 @@ mod tests {
         h.get_by_label("Close").click();
         h.run_steps(1);
         assert!(h.state().dialog.is_none(), "no prompt");
-        assert!(h.state().quit_requested);
+        assert!(!h.state().has_document() && !h.state().quit_requested);
     }
 
     #[test]
