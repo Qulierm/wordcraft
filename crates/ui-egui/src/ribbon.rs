@@ -939,6 +939,7 @@ fn painter_double_click(app: &mut WordApp) {
     let _ = app.run("edit.formatPainter", json!({"sticky": true}));
 }
 
+/// Draws the Home ribbon groups, including the editable font and font-size controls.
 fn home(app: &mut WordApp, ui: &mut Ui) {
     let st = app.session.run("format.state", &json!({})).unwrap_or_default();
     let flag = |k: &str| st.get(k).and_then(Value::as_bool).unwrap_or(false);
@@ -966,7 +967,7 @@ fn home(app: &mut WordApp, ui: &mut Ui) {
                 let fams = app.previews.families();
                 let recent: Vec<String> = app.ui.recent_fonts.iter().map(|f| app.previews.font_shown(f)).collect();
                 let prev = app.previews.font_preview_fn();
-                if let Some(f) = font_combo_with_recent(ui, "font", 150.0, &font, &fams, &recent, Some(&*prev)) {
+                if let Some(f) = font_combo_with_recent(ui, "font", tl!("Font"), 150.0, &font, &fams, &recent, Some(&*prev)) {
                     let _ = if f == crate::widgets::ADD_FONT {
                         app.run("font.add", json!({}))
                     } else if f == crate::widgets::LOAD_SYSTEM_FONTS {
@@ -986,7 +987,7 @@ fn home(app: &mut WordApp, ui: &mut Ui) {
                 // The size field stays its own box, 4 points (1 point of row spacing plus 3) from
                 // the font field.
                 ui.add_space(3.0);
-                if let Some(v) = combo(ui, "size", 52.0, &size, &sizes, None)
+                if let Some(v) = combo(ui, "size", tl!("Font Size"), 52.0, &size, &sizes, None)
                     && let Ok(x) = v.trim().parse::<f64>()
                 {
                     let _ = app.run("format.size", json!({"size": x}));
@@ -2201,7 +2202,7 @@ fn outlining(app: &mut WordApp, ui: &mut Ui) {
                 small(ui, app, "outlineTop", None, "Promote to Heading 1", "outline.promoteToHeading1", json!({}), false);
                 small(ui, app, "outlinePromote", None, "Promote", "outline.promote", json!({}), false);
                 let levels: Vec<String> = (1..=BODY).map(name).collect();
-                if let Some(v) = combo(ui, "outlineLevel", 100.0, &name(level), &levels, None)
+                if let Some(v) = combo(ui, "outlineLevel", tl!("Outline level"), 100.0, &name(level), &levels, None)
                     && let Some(i) = levels.iter().position(|x| *x == v)
                 {
                     let l = if i + 1 >= usize::from(BODY) { json!("body") } else { json!(i + 1) };
@@ -2221,7 +2222,7 @@ fn outlining(app: &mut WordApp, ui: &mut Ui) {
                 let mut shown: Vec<String> = vec![tl!("All Levels").to_string()];
                 shown.extend((1..BODY).map(name));
                 let current = shown.get(usize::from(o.show_level)).cloned().unwrap_or_default();
-                if let Some(v) = combo(ui, "outlineShowLevel", 90.0, &current, &shown, None)
+                if let Some(v) = combo(ui, "outlineShowLevel", tl!("Show Level"), 90.0, &current, &shown, None)
                     && let Some(i) = shown.iter().position(|x| *x == v)
                 {
                     let l = if i == 0 { json!("all") } else { json!(i) };
@@ -2926,6 +2927,92 @@ fn table_layout(app: &mut WordApp, ui: &mut Ui) {
 mod tests {
     use super::*;
     use wordcraft_engine::Session;
+
+    /// Builds a CPU-only editor harness for Home or Outlining with an explicit interface language.
+    /// Language and outline mode are set through app commands, not host preferences or GUI input.
+    fn combo_accessibility_harness(tab: &str, language: &str) -> egui_kittest::Harness<'static, WordApp> {
+        let mut app = WordApp::new(Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+        app.run("ui.language", json!({"value": language})).unwrap();
+        if tab == "Outlining" {
+            app.run("view.outline", json!({})).unwrap();
+        } else {
+            app.run("ui.tab", json!({"tab": tab})).unwrap();
+        }
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        assert_eq!(h.state().ui.tab, tab, "the requested ribbon tab is active");
+        h
+    }
+
+    /// Returns the stable AccessKit IDs of uniquely named Button nodes in the requested order.
+    fn named_button_ids(h: &egui_kittest::Harness<'_, WordApp>, labels: &[&str]) -> Vec<String> {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::{NodeT, Queryable};
+        labels
+            .iter()
+            .map(|label| {
+                let nodes: Vec<_> =
+                    h.query_all_by_role(Role::Button).filter(|node| node.accesskit_node().label().as_deref() == Some(*label)).collect();
+                assert_eq!(nodes.len(), 1, "expected one Button named {label:?}, found {nodes:?}");
+                format!("{:?}", nodes[0].accesskit_node().id())
+            })
+            .collect()
+    }
+
+    /// Snapshots every rendered text-input AccessKit identity and value in a ribbon harness.
+    fn editable_field_state(h: &egui_kittest::Harness<'_, WordApp>) -> Vec<(String, Option<String>)> {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::{NodeT, Queryable};
+        h.query_all_by_role(Role::TextInput).map(|node| (format!("{:?}", node.accesskit_node().id()), node.value())).collect()
+    }
+
+    /// Live Home and Outlining widgets translate their AccessKit arrow names without replacing IDs or field state.
+    #[test]
+    fn home_and_outlining_combo_names_follow_interface_language() {
+        let ru = crate::i18n::Lang::from_code("ru").expect("Russian is registered");
+        for tab in ["Home", "Outlining"] {
+            let keys: [&str; 2] = if tab == "Home" { ["Font", "Font Size"] } else { ["Outline level", "Show Level"] };
+            let english = keys.map(|key| crate::i18n::tr(crate::i18n::Lang::EN, key));
+            let russian = keys.map(|key| crate::i18n::tr(ru, key));
+            assert_ne!(english, russian, "{tab} labels have Russian translations");
+            let mut h = combo_accessibility_harness(tab, "en");
+            let english_ids = named_button_ids(&h, &english);
+            let english_fields = editable_field_state(&h);
+            let outline_state = (h.state().session.view.mode, h.state().session.view.outline.show_level);
+            assert!(!english_fields.is_empty(), "{tab} renders editable fields");
+
+            h.state_mut().run("ui.language", json!({"value": "ru"})).unwrap();
+            h.run_steps(3);
+
+            let russian_ids = named_button_ids(&h, &russian);
+            let russian_fields = editable_field_state(&h);
+            let russian_outline_state = (h.state().session.view.mode, h.state().session.view.outline.show_level);
+            assert_eq!(russian_ids, english_ids, "{tab} arrow AccessKit identities remain stable across languages");
+            assert_eq!(russian_outline_state, outline_state, "{tab} underlying outline mode and show-level state remain stable");
+            let english_field_ids: Vec<_> = english_fields.iter().map(|(id, _)| id).collect();
+            let russian_field_ids: Vec<_> = russian_fields.iter().map(|(id, _)| id).collect();
+            assert_eq!(russian_field_ids, english_field_ids, "{tab} text-input AccessKit identities remain stable");
+            let english_values: Vec<_> = english_fields.iter().map(|(_, value)| value.as_deref()).collect();
+            let russian_values: Vec<_> = russian_fields.iter().map(|(_, value)| value.as_deref()).collect();
+            if tab == "Home" {
+                assert_eq!(russian_values, english_values, "Home keeps the font and size field values");
+            } else {
+                assert_eq!(english_values, [Some("Body Text"), Some("All Levels")]);
+                assert_eq!(
+                    russian_values,
+                    [Some(crate::i18n::tr(ru, "Body Text")), Some(crate::i18n::tr(ru, "All Levels"))],
+                    "Outlining displays the same selected values in Russian",
+                );
+            }
+        }
+    }
 
     /// Two clicks arm and disarm the painter; the double-click handling then leaves it sticky (#2785).
     #[test]

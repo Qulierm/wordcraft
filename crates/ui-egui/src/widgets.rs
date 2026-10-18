@@ -523,15 +523,19 @@ pub(crate) fn swatch(ui: &mut Ui, c: wordcraft_doc::Rgb) -> bool {
 
 /// A ribbon-style text field with a dropdown list. Returns a chosen/typed value; Enter commits
 /// the typed text as is (the font size box relies on that: "1" must not become "10").
+///
+/// `id` is the stable, nonlocalized key for egui widget state. `label` is already-translated text
+/// used only as the arrow button's accessible name; it is not drawn and does not key widget state.
 pub fn combo(
     ui: &mut Ui,
     id: &str,
+    label: &str,
     width: f32,
     current: &str,
     items: &[String],
     preview: Option<&dyn Fn(&mut Ui, &str) -> Response>,
 ) -> Option<String> {
-    combo_impl(ui, id, width, current, items, &[], preview, false)
+    combo_impl(ui, id, label, width, current, items, &[], preview, false)
 }
 
 /// What [`font_combo`] returns when its list's last entry, Add Font…, is chosen (#582): the
@@ -547,15 +551,19 @@ pub const LOAD_SYSTEM_FONTS: &str = "\u{1}font.loadSystem";
 /// Up/Down move the highlight, Enter or a click applies the highlighted family ("arial" applies
 /// "Arial"), Escape restores the current font. Text matching no family is applied as typed, as
 /// Word allows fonts that are not installed.
+///
+/// `id` is the stable, nonlocalized key for egui widget state. `label` is already-translated text
+/// used only as the arrow button's accessible name; it is not drawn and does not key widget state.
 pub fn font_combo(
     ui: &mut Ui,
     id: &str,
+    label: &str,
     width: f32,
     current: &str,
     items: &[String],
     preview: Option<&dyn Fn(&mut Ui, &str) -> Response>,
 ) -> Option<String> {
-    combo_impl(ui, id, width, current, items, &[], preview, true)
+    combo_impl(ui, id, label, width, current, items, &[], preview, true)
 }
 
 /// [`font_combo`] with the `recent` families (most recent first) in a Recently Used Fonts
@@ -563,16 +571,20 @@ pub fn font_combo(
 /// typed; a query lists its matches only. Up/Down walk the recent entries, then the list; the
 /// headings are skipped. A recent font that is no longer installed stays listed and is applied as
 /// typed.
+///
+/// `id` is the stable, nonlocalized key for egui widget state. `label` is already-translated text
+/// used only as the arrow button's accessible name; it is not drawn and does not key widget state.
 pub fn font_combo_with_recent(
     ui: &mut Ui,
     id: &str,
+    label: &str,
     width: f32,
     current: &str,
     items: &[String],
     recent: &[String],
     preview: Option<&dyn Fn(&mut Ui, &str) -> Response>,
 ) -> Option<String> {
-    combo_impl(ui, id, width, current, items, recent, preview, true)
+    combo_impl(ui, id, label, width, current, items, recent, preview, true)
 }
 
 /// Indices of the `items` matching `query`, ignoring case: exact matches, then the names starting
@@ -642,9 +654,13 @@ thread_local! {
     pub(crate) static COMBO_RECTS: std::cell::RefCell<Vec<(String, Rect, Rect, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Core editable-dropdown renderer shared by [`combo`], [`font_combo`] and [`font_combo_with_recent`].
+/// `id` is the stable, nonlocalized identity for egui state; `label` is already-translated text used
+/// only as the dropdown arrow's accessible name. The label is neither drawn nor part of the identity.
 fn combo_impl(
     ui: &mut Ui,
     id: &str,
+    label: &str,
     width: f32,
     current: &str,
     items: &[String],
@@ -688,8 +704,8 @@ fn combo_impl(
         let text_rect = Rect::from_min_max(outer.min, pos2(outer.max.x - COMBO_ARROW_W, outer.max.y));
         let arrow_rect = Rect::from_min_max(pos2(outer.max.x - COMBO_ARROW_W, outer.min.y), outer.max);
         let aresp = ui.interact(arrow_rect, ui.id().with(("combo_arrow", id)), Sense::click());
-        // Screen readers hear which box the arrow belongs to: the id names the control ("font").
-        aresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{id} list")));
+        // The accessible label is translated display text; `id` remains an internal stable key.
+        aresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
         #[cfg(test)]
         COMBO_RECTS.with(|c| c.borrow_mut().push((id.to_string(), outer, text_rect, arrow_rect)));
         // The base and the arrow's own hover/pressed feedback go under the text; the single outline
@@ -1235,7 +1251,12 @@ mod tests {
                 if n == 0 {
                     ui.memory_mut(|m| m.request_focus(ui.id().with(("combo_edit", "f"))));
                 }
-                let v = if search { font_combo_with_recent(ui, "f", 150.0, "", items, recent, None) } else { combo(ui, "f", 150.0, "", items, None) };
+                let label = if search { "Font" } else { "Font Size" };
+                let v = if search {
+                    font_combo_with_recent(ui, "f", label, 150.0, "", items, recent, None)
+                } else {
+                    combo(ui, "f", label, 150.0, "", items, None)
+                };
                 out = out.take().or(v);
             })
             .drop_without_applying_deltas();
@@ -1267,29 +1288,64 @@ mod tests {
         let mut picked = None;
         COMBO_RECTS.with(|c| c.borrow_mut().clear());
         ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
-            if let Some(v) = font_combo(ui, "font", 150.0, "Arial", &fonts, None) {
+            if let Some(v) = font_combo(ui, "font", "Font", 150.0, "Arial", &fonts, None) {
                 picked = Some(v);
             }
-            if let Some(v) = combo(ui, "size", 52.0, "12", &sizes, None) {
+            if let Some(v) = combo(ui, "size", "Font Size", 52.0, "12", &sizes, None) {
                 picked = Some(v);
             }
             // The widths the other callers use: Outlining's style and level boxes and the two font
             // dialogs, so one test covers every caller of the shared control.
-            if let Some(v) = combo(ui, "outline", 100.0, "Body Text", &fonts, None) {
+            if let Some(v) = combo(ui, "outline", "Outline level", 100.0, "Body Text", &fonts, None) {
                 picked = Some(v);
             }
-            if let Some(v) = combo(ui, "levels", 90.0, "All Levels", &sizes, None) {
+            if let Some(v) = combo(ui, "levels", "Show Level", 90.0, "All Levels", &sizes, None) {
                 picked = Some(v);
             }
-            if let Some(v) = font_combo(ui, "dialog", 220.0, "Arial", &fonts, None) {
+            if let Some(v) = font_combo(ui, "dialog", "Font:", 220.0, "Arial", &fonts, None) {
                 picked = Some(v);
             }
-            if let Some(v) = font_combo(ui, "symbol", 190.0, "Arial", &fonts, None) {
+            if let Some(v) = font_combo(ui, "symbol", "Font:", 190.0, "Arial", &fonts, None) {
                 picked = Some(v);
             }
         })
         .drop_without_applying_deltas();
         (COMBO_RECTS.with(|c| c.take()), picked)
+    }
+
+    /// Each editable combo API exposes its caller-supplied human label on the actual AccessKit arrow button.
+    #[test]
+    fn editable_combo_arrows_expose_localized_caller_labels() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let fonts: Vec<String> = ["Arial", "Courier New"].map(String::from).to_vec();
+        let sizes: Vec<String> = ["10", "12"].map(String::from).to_vec();
+        let recent: Vec<String> = ["Georgia"].map(String::from).to_vec();
+        for code in ["en", "ru"] {
+            let lang = crate::i18n::Lang::from_code(code).expect("the test language is registered");
+            for (api, id, key) in [(0, "internal_size_42", "Font Size"), (1, "internal_font_17", "Font"), (2, "recent_key_99", "Asian text font:")] {
+                let label = crate::i18n::tr(lang, key);
+                if code == "ru" {
+                    assert_ne!(label, key, "{key} has a Russian translation");
+                }
+                let mut h = egui_kittest::Harness::builder().with_size(vec2(260.0, 48.0)).build_ui(|ui| match api {
+                    0 => {
+                        let _ = combo(ui, id, label, 120.0, "12", &sizes, None);
+                    }
+                    1 => {
+                        let _ = font_combo(ui, id, label, 150.0, "Arial", &fonts, None);
+                    }
+                    _ => {
+                        let _ = font_combo_with_recent(ui, id, label, 150.0, "Arial", &fonts, &recent, None);
+                    }
+                });
+                h.run_steps(2);
+                let buttons: Vec<String> = h.query_all_by_role(Role::Button).filter_map(|node| node.accesskit_node().label()).collect();
+                assert_eq!(buttons, vec![label.to_owned()], "{code} API {api} should expose one actual arrow button");
+                assert!(!buttons[0].contains(id), "the internal id must not leak: {buttons:?}");
+                assert!(!buttons[0].ends_with(" list"), "the old English suffix must not be appended: {buttons:?}");
+            }
+        }
     }
 
     /// #2068: with nothing typed, the recent families head the list and Enter applies the one
@@ -1331,7 +1387,7 @@ mod tests {
                     ui.memory_mut(|m| m.request_focus(ui.id().with(("combo_edit", "f"))));
                 }
                 area = Some(ui.id().with(("combo_search", "f")).with("list"));
-                font_combo_with_recent(ui, "f", 150.0, "", &fonts, &recent, None);
+                font_combo_with_recent(ui, "f", "Font", 150.0, "", &fonts, &recent, None);
             })
             .drop_without_applying_deltas();
             heights.push(area.and_then(|id| egui::AreaState::load(&ctx, id)).and_then(|s| s.size).map(|s| s.y));
@@ -1370,12 +1426,12 @@ mod tests {
         ];
         ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.memory_mut(|m| m.request_focus(ui.id().with(("combo_edit", "f"))));
-            font_combo_with_recent(ui, "f", 150.0, "", &fonts, &recent, None);
+            font_combo_with_recent(ui, "f", "Font", 150.0, "", &fonts, &recent, None);
         })
         .drop_without_applying_deltas();
         for (n, (events, row)) in frames.into_iter().enumerate() {
             let out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
-                font_combo_with_recent(ui, "f", 150.0, "", &fonts, &recent, None);
+                font_combo_with_recent(ui, "f", "Font", 150.0, "", &fonts, &recent, None);
             });
             let drawn = out.shapes.iter().any(|c| has_text(&c.shape, row));
             out.drop_without_applying_deltas();
@@ -1416,7 +1472,7 @@ mod tests {
         let recent: Vec<String> = ["Georgia"].map(String::from).to_vec();
         let picked = std::cell::RefCell::new(None);
         let mut h = egui_kittest::Harness::builder().with_size(vec2(420.0, 320.0)).build_ui(|ui| {
-            if let Some(v) = font_combo_with_recent(ui, "font", 150.0, "", &fonts, &recent, None) {
+            if let Some(v) = font_combo_with_recent(ui, "font", "Font", 150.0, "", &fonts, &recent, None) {
                 *picked.borrow_mut() = Some(v);
             }
         });
@@ -1459,7 +1515,7 @@ mod tests {
                     if focused {
                         ui.memory_mut(|m| m.request_focus(ui.id().with(("combo_edit", "f"))));
                     }
-                    combo(ui, "f", 150.0, "12", &sizes, None);
+                    combo(ui, "f", "Font Size", 150.0, "12", &sizes, None);
                 });
                 let (id, outer, text, arrow) = COMBO_RECTS.with(|c| c.take()).into_iter().next().expect("one combo was drawn");
                 assert_eq!(id, "f");
@@ -1659,7 +1715,7 @@ mod tests {
         COMBO_RECTS.with(|c| c.borrow_mut().clear());
         TEXT_LAYOUT.with(|c| c.borrow_mut().clear());
         ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = font_combo_with_recent(ui, "recent-font", 150.0, "Georgia", &fonts, &recent, None);
+            let _ = font_combo_with_recent(ui, "recent-font", "Font", 150.0, "Georgia", &fonts, &recent, None);
         })
         .drop_without_applying_deltas();
         let (_, outer, text, arrow) = COMBO_RECTS.with(|c| c.take()).into_iter().next().expect("recent font combo was drawn");
@@ -1688,9 +1744,9 @@ mod tests {
         let sizes: Vec<String> = ["100"].map(String::from).to_vec();
         TEXT_LAYOUT.with(|c| c.borrow_mut().clear());
         ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = font_combo(ui, "font", 150.0, "Arial", &fonts, None);
-            let _ = combo(ui, "size", 52.0, "100", &sizes, None);
-            let _ = font_combo(ui, "long", 150.0, "A very long family name that cannot fit", &long, None);
+            let _ = font_combo(ui, "font", "Font", 150.0, "Arial", &fonts, None);
+            let _ = combo(ui, "size", "Font Size", 52.0, "100", &sizes, None);
+            let _ = font_combo(ui, "long", "Font", 150.0, "A very long family name that cannot fit", &long, None);
         })
         .drop_without_applying_deltas();
         let rects = COMBO_RECTS.with(|c| c.take());
@@ -1741,7 +1797,7 @@ mod tests {
                 if focus {
                     ui.memory_mut(|m| m.request_focus(ui.id().with(("combo_edit", "font"))));
                 }
-                let _ = font_combo(ui, "font", 150.0, "A very long family name that cannot fit", &long, None);
+                let _ = font_combo(ui, "font", "Font", 150.0, "A very long family name that cannot fit", &long, None);
             })
             .drop_without_applying_deltas();
             let (_, outer, text_rect, arrow) = COMBO_RECTS.with(|c| c.borrow().last().cloned()).expect("drawn");
@@ -1770,7 +1826,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    let _ = font_combo(ui, "font", 150.0, "A very long family name that cannot fit", &long, None);
+                    let _ = font_combo(ui, "font", "Font", 150.0, "A very long family name that cannot fit", &long, None);
                 },
             )
             .drop_without_applying_deltas();
@@ -1813,7 +1869,7 @@ mod tests {
                 if focus {
                     ui.memory_mut(|m| m.request_focus(ui.id().with(("combo_edit", "font"))));
                 }
-                let _ = font_combo(ui, "font", 150.0, "Arial", &fonts, None);
+                let _ = font_combo(ui, "font", "Font", 150.0, "Arial", &fonts, None);
             });
             let outer = COMBO_RECTS.with(|c| c.borrow().last().map(|(_, o, _, _)| *o)).expect("the combo was drawn");
             let color = out.shapes.iter().find_map(|s| match &s.shape {
@@ -1841,7 +1897,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    let _ = font_combo(ui, "font", 150.0, "Arial", &fonts, None);
+                    let _ = font_combo(ui, "font", "Font", 150.0, "Arial", &fonts, None);
                 },
             )
             .drop_without_applying_deltas();
@@ -1858,7 +1914,7 @@ mod tests {
         let fonts: Vec<String> = ["Arial"].map(String::from).to_vec();
         COMBO_RECTS.with(|c| c.borrow_mut().clear());
         let out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = font_combo(ui, "font", 150.0, "Arial", &fonts, None);
+            let _ = font_combo(ui, "font", "Font", 150.0, "Arial", &fonts, None);
         });
         let (_, outer, _text, arrow) = COMBO_RECTS.with(|c| c.take()).into_iter().next().expect("the combo was drawn");
         let stroked: Vec<Rect> = out
@@ -1884,12 +1940,12 @@ mod tests {
         let fonts: Vec<String> = ["Arial", "Courier New", "Times New Roman"].map(String::from).to_vec();
         let picked = std::cell::RefCell::new(None);
         let mut h = egui_kittest::Harness::builder().with_size(vec2(420.0, 320.0)).build_ui(|ui| {
-            if let Some(v) = font_combo(ui, "font", 150.0, "Arial", &fonts, None) {
+            if let Some(v) = font_combo(ui, "font", "Font", 150.0, "Arial", &fonts, None) {
                 *picked.borrow_mut() = Some(v);
             }
         });
         h.run_steps(3);
-        assert_eq!(h.query_all_by_label("font list").count(), 1, "the arrow area carries an accessible label");
+        assert_eq!(h.query_all_by_label("Font").count(), 1, "the arrow button carries the caller-provided accessible label");
         let (_, outer, _text, arrow) = COMBO_RECTS.with(|c| c.borrow().iter().find(|(n, ..)| n == "font").cloned()).expect("the combo was drawn");
         click_pointer(&mut h, arrow.center());
         assert!(h.query_all_by_label("Courier New").count() >= 1, "the arrow opened the list");
@@ -1913,7 +1969,7 @@ mod tests {
         let fonts: Vec<String> = ["Arial"].map(String::from).to_vec();
         let picked = std::cell::RefCell::new(None);
         let mut h = egui_kittest::Harness::builder().with_size(vec2(420.0, 320.0)).build_ui(|ui| {
-            if let Some(v) = font_combo(ui, "font", 150.0, "Arial", &fonts, None) {
+            if let Some(v) = font_combo(ui, "font", "Font", 150.0, "Arial", &fonts, None) {
                 *picked.borrow_mut() = Some(v);
             }
         });
@@ -1933,7 +1989,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         let fonts: Vec<String> = ["Arial", "Courier New"].map(String::from).to_vec();
         let mut h = egui_kittest::Harness::builder().with_size(vec2(420.0, 320.0)).build_ui(|ui| {
-            let _ = font_combo(ui, "font", 150.0, "", &fonts, None);
+            let _ = font_combo(ui, "font", "Font", 150.0, "", &fonts, None);
         });
         h.run_steps(3);
         h.get_by_role(Role::TextInput).focus();
@@ -1953,9 +2009,9 @@ mod tests {
         let fonts: Vec<String> = ["Arial"].map(String::from).to_vec();
         COMBO_RECTS.with(|c| c.borrow_mut().clear());
         ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = combo(ui, "nan", f32::NAN, "12", &fonts, None);
-            let _ = combo(ui, "zero", 0.0, "12", &fonts, None);
-            let _ = combo(ui, "negative", -5.0, "12", &fonts, None);
+            let _ = combo(ui, "nan", "Font Size", f32::NAN, "12", &fonts, None);
+            let _ = combo(ui, "zero", "Font Size", 0.0, "12", &fonts, None);
+            let _ = combo(ui, "negative", "Font Size", -5.0, "12", &fonts, None);
         })
         .drop_without_applying_deltas();
         let rects = COMBO_RECTS.with(|c| c.take());
