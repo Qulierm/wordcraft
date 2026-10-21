@@ -1786,16 +1786,6 @@ fn shape(pen: &Pen, kind: &str) -> bool {
     true
 }
 
-trait ThenLines {
-    fn then_lines(self, pen: &Pen, x0: f32, x1: f32, ys: &[f32]);
-}
-
-impl ThenLines for () {
-    fn then_lines(self, pen: &Pen, x0: f32, x1: f32, ys: &[f32]) {
-        pen.lines(x0, x1, ys);
-    }
-}
-
 /// Draw an Insert › Icons library icon into `r` in `c`, from the same path data the inserted
 /// picture is rendered from (`wordcraft_render::icon_lib`).
 pub fn library(p: &Painter, r: Rect, icon: &wordcraft_render::icon_lib::Icon, c: Color32) {
